@@ -5,6 +5,7 @@ import { useIsAuthenticated, useAuthLoading } from './stores/auth.store'
 import LoginPage from './pages/LoginPage'
 import RegisterPage from './pages/RegisterPage'
 import DashboardPage from './pages/DashboardPage'
+import GamePage from './pages/GamePage'
 
 // ============================================================================
 // ROUTES PROTÉGÉES - MODE NORMAL (avec Zustand)
@@ -87,6 +88,7 @@ function App() {
             </DemoProtectedRoute>
           }
         />
+        <Route path="/game" element={<GamePage />} />
         <Route path="/" element={<Navigate to="/login" />} />
       </Routes>
     )
@@ -119,6 +121,7 @@ function App() {
           </ProtectedRoute>
         }
       />
+      <Route path="/game" element={<GamePage />} />
       <Route path="/" element={<Navigate to="/dashboard" />} />
     </Routes>
   )

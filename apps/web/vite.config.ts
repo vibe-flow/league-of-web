@@ -3,7 +3,19 @@ import react from '@vitejs/plugin-react'
 import path from 'path'
 
 export default defineConfig({
-  plugins: [react()],
+  plugins: [
+    react(),
+    {
+      name: 'game-full-reload',
+      handleHotUpdate({ file, server }) {
+        // Force full page reload for game files — PixiJS can't survive HMR
+        if (file.includes('/game/') || file.includes('/shared/src/game/')) {
+          server.ws.send({ type: 'full-reload' })
+          return []
+        }
+      },
+    },
+  ],
   resolve: {
     alias: {
       '@': path.resolve(__dirname, './src'),

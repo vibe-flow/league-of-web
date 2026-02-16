@@ -1,33 +1,42 @@
 # CLAUDE.md
 
+## Projet
+
+League of Web — MOBA web (mode ARAM) jouable en navigateur.
+
 ## Stack
 
-- Monorepo Bun : `apps/web` (React/Vite), `apps/api` (NestJS)
-- Validation : Zod uniquement (pas class-validator), schemas dans `packages/shared/src/schemas/`
-- API : tRPC par defaut, REST si besoin externe
+- Monorepo Bun : `apps/web` (React/Vite + PixiJS), `apps/api` (NestJS)
+- Validation : Zod, schemas dans `packages/shared/src/schemas/`
+- API : tRPC pour le hors-jeu (lobby, stats), WebSocket pour le in-game
 - ORM : Prisma, schema dans `prisma/schema.prisma`
-- State management : Zustand (`stores/auth.store.ts`)
-- Data fetching : TanStack Query (via tRPC)
-- Tests : Vitest (unitaires et integration)
-- Logging : Pino via `LoggerService`
-- AI : Module unifie LangChain/LangGraph (`modules/ai/ai.service.ts`) via LiteLLM + Langfuse
-- Python : Scripts standalone dans `scripts/python/`, appeles via `pythonService.runScript()`
+- State management : Zustand (`stores/`)
+- Rendu jeu : PixiJS (Canvas/WebGL) dans un composant React
+- Game server : NestJS WebSocket Gateway + game loop custom (30Hz)
+- Tests : Vitest
+
+## Infrastructure
+
+PostgreSQL, Redis et autres services sont heberges dans un repo partage :
+`/Users/flow/Dev/local-services/` (docker-compose avec `make up`).
+
+Ce projet n'a PAS son propre Docker Compose pour la DB. Les connexions :
+
+- PostgreSQL : `localhost:5432` (user: postgres, password: postgres)
+- Redis : `localhost:6379`
 
 ## Commandes
 
 ```bash
-make setup            # Installation complete (install + docker + migrate + seed)
-make dev              # Lance le projet
-make docker-up        # Lance postgres + redis (base)
-make docker-up-llm    # Lance base + litellm
-make db-migrate       # Migrations Prisma
-make db-studio        # Interface BDD
-make test             # Lance tous les tests
-make test-api         # Tests API uniquement
-make test-web         # Tests Web uniquement
-make test-cov         # Tests avec coverage
-make lint             # Lance ESLint
-make format           # Formate le code (Prettier + ESLint)
+bun install              # Installer les dependances
+bun run dev              # Lancer le dev (web + api)
+bun run dev:web          # Lancer seulement le frontend
+bun run dev:api          # Lancer seulement le backend
+make db-migrate          # Migrations Prisma
+make db-studio           # Interface BDD
+make test                # Lancer tous les tests
+make lint                # ESLint
+make format              # Prettier + ESLint
 ```
 
 ## Conventions
@@ -37,81 +46,28 @@ make format           # Formate le code (Prettier + ESLint)
 - Schemas Zod partages dans `packages/shared/src/schemas/`
 - Tests dans le meme dossier que le fichier teste : `*.spec.ts`
 - Composants UI avec shadcn/ui + Tailwind
-- State global via Zustand stores dans `apps/web/src/stores/`
+- State global via Zustand stores
 
-## Architecture Frontend
+## Architecture du Jeu
 
-- Auth state : `useAuthStore` (Zustand avec persistance localStorage)
-- tRPC client avec refresh token automatique dans `lib/trpc.ts`
-- Routes protegees via `ProtectedRoute` component
+- **Hors-jeu** (lobby, selection champion, resultats) : React + shadcn/ui + tRPC
+- **In-game** (le match) : PixiJS Canvas + WebSocket temps reel
+- **Serveur autoritaire** : le serveur fait foi, le client predit et affiche
+- **Shared package** : types, constantes, formules de jeu partagees client/serveur
 
-## Architecture Backend
+## Documentation
 
-- `LoggerService` : Injectable Pino logger (global)
-- `PrismaService` : Methodes `softDelete()` et `restore()` disponibles
-- tRPC error formatter : Erreurs Zod formatees automatiquement
-- Auth : JWT access token (15m) + refresh token (7d) en DB
-
-## Module AI (LangChain/LangGraph)
-
-Structure du module `modules/ai/` :
-
-- `ai.service.ts` : Service principal avec appels directs et helpers LangGraph
-- `providers/` : Configuration ChatOpenAI (LiteLLM) et PostgresSaver (checkpointer)
-- `graphs/` : Dossier pour les StateGraphs LangGraph
-- `tools/` : Dossier pour les tools LangChain
-- `rag/` : Dossier pour les pipelines RAG
-- `memory/` : Dossier pour la gestion memoire
-
-Methodes principales de `AiService` :
-
-- `chatCompletion(params)` : Appel LLM direct avec tracing Langfuse
-- `embedding(params)` : Embeddings via LiteLLM
-- `getModel()` : Retourne un ChatOpenAI pour LangGraph
-- `getCheckpointer()` : Retourne le PostgresSaver pour persistance
-
-Tracing Langfuse (SDK direct, pas de callback) :
-
-- `langfuseService.createTrace()` : Trace parent pour un workflow
-- `trace.span()` : Span enfant pour une etape/noeud
-- `trace.generation()` : Pour les appels LLM (avec input/output/usage)
-- `langfuseService.flush()` : Envoyer les traces (async)
-
-Exemple d'usage LangGraph avec tracing :
-
-```typescript
-const model = aiService.getModel()
-const checkpointer = aiService.getCheckpointer()
-const trace = langfuseService.createTrace({ name: 'my-agent', userId })
-
-const graph = new StateGraph(MessagesAnnotation)
-  .addNode('agent', async (state) => {
-    const gen = trace.generation({ name: 'llm-call', model: 'gpt-4o' })
-    const result = await model.invoke(state.messages)
-    gen.end({ output: result.content })
-    return result
-  })
-  .compile({ checkpointer })
-
-await graph.invoke(state)
-await langfuseService.flush()
-```
-
-## Mode Demo (presentations client)
-
-Pour creer une demo interactive avec fausses donnees (sans backend) :
-
-1. Creer `apps/web/.env` avec `VITE_DEMO_MODE=true`
-2. Lancer `cd apps/web && bun run dev`
-3. Voir `apps/web/DEMO.md` pour la documentation complete
-
-Structure : `apps/web/src/demo/` contient le systeme de mock data et hooks.
+- `docs/ARCHITECTURE.md` — Vue d'ensemble technique
+- `docs/GAME_DESIGN.md` — Regles du jeu, stats, formules
+- `docs/ROADMAP.md` — Phases de developpement
+- `docs/technical/NETCODE.md` — Synchronisation reseau
+- `docs/technical/CHAMPIONS.md` — Systeme de champions et sorts
+- `docs/technical/PATHFINDING.md` — Navigation et deplacement
+- `docs/technical/GAME_LOOP.md` — Boucle de jeu et state machines
 
 ## A eviter
 
 - class-validator (utiliser Zod)
-- localStorage direct pour l'auth (utiliser `useAuthStore`)
-- Appels LLM directs (passer par AiService)
-- Code Python dans NestJS (utiliser les scripts)
-- Dependances hors workspace
+- localStorage direct pour l'auth (utiliser Zustand store)
+- Docker Compose local pour DB (utiliser local-services)
 - Jest (utiliser Vitest)
