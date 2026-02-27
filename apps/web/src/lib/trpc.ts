@@ -56,11 +56,16 @@ export function createTrpcClient() {
         url: '/trpc',
         async headers() {
           const token = await getValidToken()
-          return token
-            ? {
-                authorization: `Bearer ${token}`,
-              }
-            : {}
+          const headers: Record<string, string> = {}
+          if (token) {
+            headers.authorization = `Bearer ${token}`
+          }
+          // DEV: pass the dev player id so the server knows who we are
+          const devId = sessionStorage.getItem('dev-player-id')
+          if (devId) {
+            headers['x-dev-player-id'] = devId
+          }
+          return headers
         },
         async fetch(url, options) {
           const response = await fetch(url, options)

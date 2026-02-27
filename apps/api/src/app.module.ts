@@ -15,11 +15,13 @@ import { PythonModule } from './modules/python/python.module'
 import { LoggerModule } from './modules/logger/logger.module'
 // import { QueueModule } from './modules/queue/queue.module'; // Uncomment to enable
 import { TrpcModule } from './trpc/trpc.module'
+import { GameModule } from './modules/game/game.module'
 
 @Module({
   imports: [
     ConfigModule.forRoot({
       isGlobal: true,
+      envFilePath: ['.env', '../../.env'],
       validate: (config) => {
         try {
           return EnvSchema.parse(config)
@@ -44,6 +46,7 @@ import { TrpcModule } from './trpc/trpc.module'
     PythonModule,
     // QueueModule, // Uncomment to enable
     TrpcModule,
+    GameModule,
   ],
   controllers: [AppController],
   providers: [

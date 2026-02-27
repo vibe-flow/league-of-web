@@ -5,7 +5,7 @@ import {
   type AramMapDefinition,
   type WorldPosition,
   type GridCoord,
-} from '@template-dev/shared'
+} from '../game'
 
 export class NavigationGrid {
   readonly gridWidth: number

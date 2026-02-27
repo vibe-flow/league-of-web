@@ -6,6 +6,7 @@ import { cleanupOpenApiDoc } from 'nestjs-zod'
 import * as pino from 'pino'
 import { AppModule } from './app.module'
 import { TrpcRouter } from './trpc/trpc.router'
+import { GameWebSocketServer } from './modules/game/game.gateway'
 
 async function bootstrap() {
   const logger = pino.default({
@@ -28,7 +29,14 @@ async function bootstrap() {
 
   // CORS
   app.enableCors({
-    origin: ['http://localhost:5173'],
+    origin: (origin, callback) => {
+      // Allow localhost and ngrok URLs
+      if (!origin || origin.includes('localhost') || origin.includes('ngrok')) {
+        callback(null, true)
+      } else {
+        callback(null, false)
+      }
+    },
     credentials: true,
   })
 
@@ -53,9 +61,15 @@ async function bootstrap() {
 
   await app.listen(port)
 
+  // Attach WebSocket server to the HTTP server
+  const httpServer = app.getHttpServer()
+  const wsServer = app.get(GameWebSocketServer)
+  wsServer.attach(httpServer)
+
   Logger.log(`🚀 Application is running on: http://localhost:${port}/api`)
   Logger.log(`📚 Swagger documentation: http://localhost:${port}/api/docs`)
   Logger.log(`🔌 tRPC endpoint: http://localhost:${port}/trpc`)
+  Logger.log(`🎮 WebSocket game server: ws://localhost:${port}/game`)
 }
 
 bootstrap()

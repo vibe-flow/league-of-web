@@ -1,29 +1,22 @@
+import { useEffect } from 'react'
 import { Routes, Route, Navigate } from 'react-router-dom'
 import { DEMO_MODE } from './demo'
 import { useDemo } from './demo/DemoProvider'
-import { useIsAuthenticated, useAuthLoading } from './stores/auth.store'
+import { useIsAuthenticated, useAuthLoading, useAuthStore } from './stores/auth.store'
 import LoginPage from './pages/LoginPage'
 import RegisterPage from './pages/RegisterPage'
 import DashboardPage from './pages/DashboardPage'
 import GamePage from './pages/GamePage'
+import LobbyPage from './pages/LobbyPage'
+import MatchPage from './pages/MatchPage'
 
 // ============================================================================
 // ROUTES PROTÉGÉES - MODE NORMAL (avec Zustand)
 // ============================================================================
 
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
-  const isAuthenticated = useIsAuthenticated()
-  const isLoading = useAuthLoading()
-
-  if (isLoading) {
-    return (
-      <div className="flex min-h-screen items-center justify-center">
-        <div className="h-8 w-8 animate-spin rounded-full border-b-2 border-gray-900" />
-      </div>
-    )
-  }
-
-  return isAuthenticated ? <>{children}</> : <Navigate to="/login" />
+  // Auth disabled for development — allow all routes
+  return <>{children}</>
 }
 
 function PublicRoute({ children }: { children: React.ReactNode }) {
@@ -60,6 +53,19 @@ function DemoPublicRoute({ children }: { children: React.ReactNode }) {
 // ============================================================================
 
 function App() {
+  // DEV: inject a fake user so lobby/match pages work without login
+  // Each tab gets a unique ID via sessionStorage (localStorage is shared between tabs)
+  const setUser = useAuthStore((s) => s.setUser)
+  useEffect(() => {
+    let devId = sessionStorage.getItem('dev-player-id')
+    if (!devId) {
+      devId = 'dev-player-' + Math.random().toString(36).slice(2, 8)
+      sessionStorage.setItem('dev-player-id', devId)
+    }
+    // Always force the user from sessionStorage — overrides localStorage rehydration
+    setUser({ id: devId, email: `${devId}@localhost`, name: devId, role: 'USER' })
+  }, [setUser])
+
   // En mode démo, utilise les routes démo
   if (DEMO_MODE) {
     return (
@@ -89,6 +95,8 @@ function App() {
           }
         />
         <Route path="/game" element={<GamePage />} />
+        <Route path="/lobby" element={<LobbyPage />} />
+        <Route path="/game/:matchId" element={<MatchPage />} />
         <Route path="/" element={<Navigate to="/login" />} />
       </Routes>
     )
@@ -122,6 +130,22 @@ function App() {
         }
       />
       <Route path="/game" element={<GamePage />} />
+      <Route
+        path="/lobby"
+        element={
+          <ProtectedRoute>
+            <LobbyPage />
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/game/:matchId"
+        element={
+          <ProtectedRoute>
+            <MatchPage />
+          </ProtectedRoute>
+        }
+      />
       <Route path="/" element={<Navigate to="/dashboard" />} />
     </Routes>
   )

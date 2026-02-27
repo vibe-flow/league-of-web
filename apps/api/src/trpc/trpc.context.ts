@@ -24,6 +24,16 @@ export async function createContext({ req, res }: CreateExpressContextOptions) {
     }
   }
 
+  // DEV: auto-assign a dev user when no auth is provided
+  if (!user) {
+    const devId = (req.headers['x-dev-player-id'] as string) || 'dev-player-1'
+    user = {
+      userId: devId,
+      email: `${devId}@localhost`,
+      role: 'USER',
+    }
+  }
+
   return {
     req,
     res,

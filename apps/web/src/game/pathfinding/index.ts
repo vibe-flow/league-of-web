@@ -1,2 +1,1 @@
-export { NavigationGrid } from './NavigationGrid'
-export { findPath, hasLineOfSight } from './AStar'
+export { NavigationGrid, findPath, hasLineOfSight } from '@template-dev/shared'

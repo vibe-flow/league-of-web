@@ -1,4 +1,4 @@
-import { MAX_ASTAR_ITERATIONS, type WorldPosition, type GridCoord } from '@template-dev/shared'
+import { MAX_ASTAR_ITERATIONS, type WorldPosition, type GridCoord } from '../game'
 import type { NavigationGrid } from './NavigationGrid'
 
 // =============================================================================

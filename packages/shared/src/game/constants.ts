@@ -110,6 +110,28 @@ export const MINIMAP_SIZE = 180 // square minimap for diagonal display
 export const MINIMAP_PADDING = 12
 
 // =============================================================================
+// Network / Game loop
+// =============================================================================
+
+export const TICK_RATE = 30
+export const TICK_DURATION_MS = 1000 / TICK_RATE // ~33.33ms
+export const TICK_DURATION_S = 1 / TICK_RATE
+export const MAX_CATCH_UP_TICKS = 3
+
+export const INTERPOLATION_DELAY_MS = 100 // render ~3 ticks behind server
+export const SNAP_THRESHOLD = 2 // units — ignore small prediction errors
+export const TELEPORT_THRESHOLD = 100 // units — snap instantly if too far off
+
+// =============================================================================
+// Match
+// =============================================================================
+
+export const COUNTDOWN_DURATION_MS = 3000
+export const LOADING_TIMEOUT_MS = 60_000
+export const MAX_PLAYERS_PER_MATCH = 10
+export const MAX_PLAYERS_PHASE2 = 2 // Phase 2: only 2 players
+
+// =============================================================================
 // Colors (hex numbers for PixiJS)
 // =============================================================================
 
