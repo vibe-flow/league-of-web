@@ -1,3 +1,4 @@
+import * as THREE from 'three'
 import {
   MAP_WIDTH,
   MAP_HEIGHT,
@@ -8,7 +9,6 @@ import {
   CAMERA_EDGE_THRESHOLD,
   type WorldPosition,
 } from '@template-dev/shared'
-import type { Container } from 'pixi.js'
 import { useGameSettingsStore } from '@/stores/game-settings.store'
 
 // -45° rotation so the map goes bottom-left → top-right (like Howling Abyss)
@@ -17,6 +17,8 @@ const INV_COS = Math.cos(-ROTATION)
 const INV_SIN = Math.sin(-ROTATION)
 
 export class Camera {
+  readonly threeCamera: THREE.OrthographicCamera
+
   private _x = 0
   private _y = 0
   private _zoom = CAMERA_DEFAULT_ZOOM
@@ -41,8 +43,21 @@ export class Camera {
     return useGameSettingsStore.getState().keyPanSpeed
   }
 
-  constructor(private gameContainer: Container) {
-    this.gameContainer.rotation = ROTATION
+  constructor(screenWidth: number, screenHeight: number) {
+    this.screenWidth = screenWidth
+    this.screenHeight = screenHeight
+
+    const hw = screenWidth / 2
+    const hh = screenHeight / 2
+    this.threeCamera = new THREE.OrthographicCamera(-hw, hw, hh, -hh, 0.1, 10000)
+
+    // Position camera above the scene, looking down
+    this.threeCamera.position.set(0, 2000, 0)
+    this.threeCamera.up.set(0, 0, -1)
+    this.threeCamera.lookAt(0, 0, 0)
+
+    // Apply -45° rotation
+    this.threeCamera.rotation.z = ROTATION
   }
 
   get x(): number {
@@ -61,6 +76,7 @@ export class Camera {
   setScreenSize(width: number, height: number): void {
     this.screenWidth = width
     this.screenHeight = height
+    this.applyTransform()
   }
 
   setLocked(locked: boolean): void {
@@ -91,12 +107,10 @@ export class Camera {
     } else {
       // Smooth pan toward minimap target
       if (this.panTarget) {
-        // Exponential lerp: ~90% of the way in ~0.1s
         const t = 1 - Math.exp(-15 * dt)
         this._x += (this.panTarget.x - this._x) * t
         this._y += (this.panTarget.y - this._y) * t
 
-        // Snap when close enough to avoid endless tiny drifts
         const dx = this.panTarget.x - this._x
         const dy = this.panTarget.y - this._y
         if (dx * dx + dy * dy < 1) {
@@ -164,7 +178,6 @@ export class Camera {
   setKeyPan(dx: number, dy: number): void {
     this.keyPanX = dx
     this.keyPanY = dy
-    // Normalize diagonal
     if (dx !== 0 && dy !== 0) {
       const inv = 1 / Math.SQRT2
       this.keyPanX = dx * inv
@@ -197,13 +210,22 @@ export class Camera {
     }
   }
 
-  /** Apply camera transform to the game container. */
+  /** Apply camera transform. */
   private applyTransform(): void {
     this._x = Math.max(0, Math.min(MAP_WIDTH, this._x))
     this._y = Math.max(0, Math.min(MAP_HEIGHT, this._y))
 
-    this.gameContainer.pivot.set(this._x, this._y)
-    this.gameContainer.position.set(this.screenWidth / 2, this.screenHeight / 2)
-    this.gameContainer.scale.set(this._zoom)
+    // Position camera above the target point (game Y → Three.js Z)
+    this.threeCamera.position.x = this._x
+    this.threeCamera.position.z = this._y
+
+    // Update zoom by adjusting the frustum
+    const hw = this.screenWidth / (2 * this._zoom)
+    const hh = this.screenHeight / (2 * this._zoom)
+    this.threeCamera.left = -hw
+    this.threeCamera.right = hw
+    this.threeCamera.top = hh
+    this.threeCamera.bottom = -hh
+    this.threeCamera.updateProjectionMatrix()
   }
 }

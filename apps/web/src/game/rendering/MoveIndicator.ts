@@ -1,25 +1,38 @@
-import { Graphics } from 'pixi.js'
+import * as THREE from 'three'
 import { COLORS, type WorldPosition } from '@template-dev/shared'
 
 /** A small animated ring that appears where the player clicks to move. */
 export class MoveIndicator {
-  readonly graphics = new Graphics()
+  readonly mesh: THREE.Mesh
+  private material: THREE.MeshBasicMaterial
   private timer = 0
   private active = false
   private static readonly DURATION = 0.6 // seconds
   private static readonly RADIUS = 20
 
   constructor() {
-    this.graphics.label = 'move-indicator'
-    this.graphics.visible = false
+    // Ring geometry lying flat on the ground
+    const geo = new THREE.RingGeometry(MoveIndicator.RADIUS * 0.9, MoveIndicator.RADIUS, 32)
+    this.material = new THREE.MeshBasicMaterial({
+      color: COLORS.MOVE_INDICATOR,
+      transparent: true,
+      opacity: 1,
+      side: THREE.DoubleSide,
+    })
+    this.mesh = new THREE.Mesh(geo, this.material)
+    this.mesh.rotation.x = -Math.PI / 2
+    this.mesh.position.y = 0.1 // slightly above ground
+    this.mesh.visible = false
   }
 
   show(pos: WorldPosition): void {
-    this.graphics.x = pos.x
-    this.graphics.y = pos.y
-    this.graphics.visible = true
+    this.mesh.position.x = pos.x
+    this.mesh.position.z = pos.y // game Y → Three.js Z
+    this.mesh.visible = true
     this.active = true
     this.timer = 0
+    this.mesh.scale.set(0.5, 0.5, 0.5)
+    this.material.opacity = 1
   }
 
   update(dt: number): void {
@@ -30,22 +43,19 @@ export class MoveIndicator {
 
     if (t >= 1) {
       this.active = false
-      this.graphics.clear()
-      this.graphics.visible = false
+      this.mesh.visible = false
       return
     }
 
     // Expanding ring that fades out
-    const radius = MoveIndicator.RADIUS * (0.5 + t * 0.5)
-    const alpha = 1 - t
-
-    this.graphics.clear()
-    this.graphics.circle(0, 0, radius)
-    this.graphics.stroke({ width: 2, color: COLORS.MOVE_INDICATOR })
-    this.graphics.alpha = alpha
+    const scale = 0.5 + t * 0.5
+    this.mesh.scale.set(scale, scale, scale)
+    this.material.opacity = 1 - t
   }
 
   destroy(): void {
-    this.graphics.destroy()
+    this.mesh.geometry.dispose()
+    this.material.dispose()
+    this.mesh.parent?.remove(this.mesh)
   }
 }

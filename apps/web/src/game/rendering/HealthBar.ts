@@ -1,50 +1,61 @@
-import { Container, Graphics } from 'pixi.js'
-import { DEFAULT_CHAMPION_RADIUS, COLORS } from '@template-dev/shared'
+import { CSS2DObject } from 'three/addons/renderers/CSS2DRenderer.js'
+import { DEFAULT_CHAMPION_RADIUS } from '@template-dev/shared'
 
-const BAR_WIDTH = 80
+const DEFAULT_BAR_WIDTH = 80
 const BAR_HEIGHT = 8
-const BAR_OFFSET_Y = -(DEFAULT_CHAMPION_RADIUS + 16)
 
 export class HealthBar {
-  readonly container = new Container()
-  private bg: Graphics
-  private fill: Graphics
+  readonly object: CSS2DObject
+  private fillEl: HTMLDivElement
+  constructor(barWidth: number = DEFAULT_BAR_WIDTH, offsetY?: number) {
+    const _offsetY = offsetY ?? -(DEFAULT_CHAMPION_RADIUS + 16)
 
-  constructor() {
-    this.container.label = 'healthbar'
+    // Container div
+    const container = document.createElement('div')
+    container.style.cssText = `
+      width: ${barWidth}px;
+      height: ${BAR_HEIGHT}px;
+      background: #333333;
+      border: 1px solid #000000;
+      border-radius: 2px;
+      overflow: hidden;
+      transform: translateX(-50%);
+      pointer-events: none;
+    `
 
-    // Background
-    this.bg = new Graphics()
-    this.bg.roundRect(-BAR_WIDTH / 2, BAR_OFFSET_Y, BAR_WIDTH, BAR_HEIGHT, 2)
-    this.bg.fill(COLORS.HEALTH_BAR_BG)
-    this.bg.roundRect(-BAR_WIDTH / 2, BAR_OFFSET_Y, BAR_WIDTH, BAR_HEIGHT, 2)
-    this.bg.stroke({ width: 1, color: COLORS.HEALTH_BAR_BORDER })
-    this.container.addChild(this.bg)
+    // Fill bar
+    this.fillEl = document.createElement('div')
+    this.fillEl.style.cssText = `
+      height: 100%;
+      width: 100%;
+      background: #22cc44;
+      border-radius: 1px;
+      transition: width 0.05s linear;
+    `
+    container.appendChild(this.fillEl)
 
-    // Fill
-    this.fill = new Graphics()
-    this.container.addChild(this.fill)
-
-    this.update(1)
+    this.object = new CSS2DObject(container)
+    // Position above the entity in 3D space (Y up in Three.js)
+    // Use a fixed height above entities; negative offsetY maps to positive Y
+    this.object.position.set(0, Math.abs(_offsetY) + 20, 0)
   }
 
   update(ratio: number): void {
     const clamped = Math.max(0, Math.min(1, ratio))
-    const fillWidth = BAR_WIDTH * clamped
+    this.fillEl.style.width = `${clamped * 100}%`
 
-    this.fill.clear()
-    if (fillWidth > 2) {
-      this.fill.roundRect(-BAR_WIDTH / 2 + 1, BAR_OFFSET_Y + 1, fillWidth - 2, BAR_HEIGHT - 2, 1)
-      this.fill.fill(COLORS.HEALTH_BAR_FILL)
+    // Dynamic color based on HP ratio
+    if (clamped > 0.5) {
+      this.fillEl.style.background = '#22cc44' // green
+    } else if (clamped > 0.25) {
+      this.fillEl.style.background = '#ddaa00' // yellow
+    } else {
+      this.fillEl.style.background = '#cc2222' // red
     }
   }
 
-  setPosition(x: number, y: number): void {
-    this.container.x = x
-    this.container.y = y
-  }
-
   destroy(): void {
-    this.container.destroy({ children: true })
+    this.object.element.remove()
+    this.object.removeFromParent()
   }
 }
