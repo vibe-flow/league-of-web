@@ -71,14 +71,14 @@
 
 ### Scope
 
-- [ ] Système de stats (HP, AD, Armor, etc.)
-- [ ] Auto-attaques (clic sur un ennemi à portée)
-- [ ] Animation d'auto-attaque (windup + projectile si distance)
-- [ ] Pipeline de dégâts (bruts → armor → dégâts finaux)
-- [ ] Barres de vie dynamiques
-- [ ] Mort et réapparition (timer + respawn en base)
-- [ ] Feedbacks visuels (flash rouge quand touché, animation de mort)
-- [ ] Système de niveaux et XP (gain passif + kills)
+- [x] Système de stats (HP, AD, Armor, etc.)
+- [x] Auto-attaques (clic sur un ennemi à portée)
+- [x] Animation d'auto-attaque (windup + projectile si distance)
+- [x] Pipeline de dégâts (bruts → armor → dégâts finaux)
+- [x] Barres de vie dynamiques
+- [x] Mort et réapparition (timer + respawn en base)
+- [x] Feedbacks visuels (flash rouge quand touché, animation de mort)
+- [x] Système de niveaux et XP (gain passif + kills)
 
 ### Ce qu'on ne fait PAS
 

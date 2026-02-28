@@ -66,6 +66,9 @@ prisma/migrations/**
 *.temp
 .cache
 
+# Game assets (downloaded via scripts/download-lol-assets.ts)
+assets/lol/
+
 # Shared package compiled files (use source TypeScript only)
 packages/shared/src/**/*.js
 packages/shared/src/**/*.js.map
