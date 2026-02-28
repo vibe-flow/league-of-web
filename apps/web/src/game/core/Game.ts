@@ -1,4 +1,5 @@
-import { Application, Container } from 'pixi.js'
+import * as THREE from 'three'
+import { CSS2DRenderer } from 'three/addons/renderers/CSS2DRenderer.js'
 import {
   ARAM_MAP,
   BLUE_SPAWN,
@@ -7,25 +8,31 @@ import {
   DEFAULT_MAX_HP,
   WAYPOINT_REACH_THRESHOLD,
   COLORS,
+  TOWER_DEFINITIONS,
   type WorldPosition,
 } from '@template-dev/shared'
 import { NavigationGrid, findPath, hasLineOfSight } from '../pathfinding'
 import { useGameSettingsStore } from '@/stores/game-settings.store'
+import { AssetManager } from '../assets/AssetManager'
 import { Camera } from './Camera'
 import { MapRenderer } from '../rendering/MapRenderer'
-import { ChampionRenderer } from '../rendering/ChampionRenderer'
+import { ChampionRenderer3D } from '../rendering/ChampionRenderer3D'
+import { TowerRenderer3D } from '../rendering/TowerRenderer3D'
 import { HealthBar } from '../rendering/HealthBar'
 import { MoveIndicator } from '../rendering/MoveIndicator'
 import { Minimap } from '../rendering/Minimap'
 
 export class Game {
-  private app: Application
-  private gameContainer!: Container
-  private uiContainer!: Container
+  private renderer!: THREE.WebGLRenderer
+  private cssRenderer!: CSS2DRenderer
+  private scene = new THREE.Scene()
+  private lastTime = 0
+  private animationFrameId = 0
 
   private camera!: Camera
   private mapRenderer!: MapRenderer
-  private championRenderer!: ChampionRenderer
+  private championRenderer!: ChampionRenderer3D
+  private towerRenderers: TowerRenderer3D[] = []
   private healthBar!: HealthBar
   private moveIndicator!: MoveIndicator
   private minimap!: Minimap
@@ -36,13 +43,13 @@ export class Game {
   private playerHP = DEFAULT_HP
   private playerMaxHP = DEFAULT_MAX_HP
   private waypoints: WorldPosition[] = []
-  private moveTarget: WorldPosition | null = null // final destination for facing
+  private moveTarget: WorldPosition | null = null
 
   private destroyed = false
   private _paused = false
   private rightMouseDown = false
   private lastMoveCommandTime = 0
-  private static readonly MOVE_THROTTLE_MS = 50 // recalc path at most every 50ms
+  private static readonly MOVE_THROTTLE_MS = 50
 
   // Camera pan keys state
   private keysDown = new Set<string>()
@@ -63,7 +70,6 @@ export class Game {
   private onKeyUp: ((e: KeyboardEvent) => void) | null = null
   private cleanupMinimapInput: (() => void) | null = null
   private canvas: HTMLCanvasElement | null = null
-  private tickerCallback: ((ticker: { deltaMS: number }) => void) | null = null
 
   get paused(): boolean {
     return this._paused
@@ -71,76 +77,83 @@ export class Game {
 
   setPaused(paused: boolean): void {
     this._paused = paused
-    // Reset all input state to avoid stale state after un-pause
     this.rightMouseDown = false
     this.keysDown.clear()
     this.spaceDown = false
     if (this.camera) {
-      // Restore Y toggle state instead of forcing unlock
       this.camera.setLocked(useGameSettingsStore.getState().cameraLocked)
       this.camera.setKeyPan(0, 0)
       this.camera.resetEdgePan()
     }
   }
 
-  constructor() {
-    this.app = new Application()
-  }
-
   async init(canvas: HTMLCanvasElement): Promise<void> {
     this.canvas = canvas
+    const container = canvas.parentElement as HTMLDivElement
     const w = window.innerWidth
     const h = window.innerHeight
 
-    await this.app.init({
-      canvas,
-      width: w,
-      height: h,
-      backgroundColor: 0x111111,
-      antialias: true,
-      resolution: window.devicePixelRatio || 1,
-      autoDensity: true,
-    })
+    // Three.js WebGL renderer
+    this.renderer = new THREE.WebGLRenderer({ canvas, antialias: true })
+    this.renderer.setPixelRatio(window.devicePixelRatio || 1)
+    this.renderer.setSize(w, h)
+    this.renderer.setClearColor(0x111111)
 
-    // Containers
-    this.gameContainer = new Container()
-    this.gameContainer.label = 'game-world'
-    this.app.stage.addChild(this.gameContainer)
+    // CSS2D renderer for health bars
+    this.cssRenderer = new CSS2DRenderer()
+    this.cssRenderer.setSize(w, h)
+    this.cssRenderer.domElement.style.position = 'absolute'
+    this.cssRenderer.domElement.style.top = '0'
+    this.cssRenderer.domElement.style.left = '0'
+    this.cssRenderer.domElement.style.pointerEvents = 'none'
+    container.appendChild(this.cssRenderer.domElement)
 
-    this.uiContainer = new Container()
-    this.uiContainer.label = 'ui'
-    this.app.stage.addChild(this.uiContainer)
+    // Lighting
+    const ambientLight = new THREE.AmbientLight(0xffffff, 0.7)
+    this.scene.add(ambientLight)
+    const dirLight = new THREE.DirectionalLight(0xffffff, 0.8)
+    dirLight.position.set(3000, 1000, 600)
+    this.scene.add(dirLight)
 
     // Navigation grid
     this.grid = new NavigationGrid(ARAM_MAP)
 
     // Camera
-    this.camera = new Camera(this.gameContainer)
-    this.camera.setScreenSize(w, h)
+    this.camera = new Camera(w, h)
     this.camera.setZoom(0.8)
 
     // Map
     this.mapRenderer = new MapRenderer()
     this.mapRenderer.build()
-    this.gameContainer.addChild(this.mapRenderer.container)
+    this.scene.add(this.mapRenderer.group)
 
     // Move indicator
     this.moveIndicator = new MoveIndicator()
-    this.gameContainer.addChild(this.moveIndicator.graphics)
+    this.scene.add(this.moveIndicator.mesh)
 
     // Champion
-    this.championRenderer = new ChampionRenderer(COLORS.CHAMPION_BLUE)
+    this.championRenderer = new ChampionRenderer3D(COLORS.CHAMPION_BLUE)
     this.championRenderer.setPosition(this.playerPos)
-    this.gameContainer.addChild(this.championRenderer.container)
+    this.scene.add(this.championRenderer.group)
 
     // Health bar (child of champion so it moves with it)
     this.healthBar = new HealthBar()
-    this.championRenderer.container.addChild(this.healthBar.container)
+    this.championRenderer.group.add(this.healthBar.object)
 
-    // Minimap (in UI layer, not affected by game camera)
-    this.minimap = new Minimap()
+    // Towers & Nexuses (static decorative in solo mode)
+    for (const def of TOWER_DEFINITIONS) {
+      const tower = new TowerRenderer3D(def.team, def.tier, def.radius)
+      tower.setPosition(def.position)
+      const barWidth = def.tier === 'nexus' ? 160 : 120
+      const hb = new HealthBar(barWidth, -(def.radius + 16))
+      tower.group.add(hb.object)
+      this.scene.add(tower.group)
+      this.towerRenderers.push(tower)
+    }
+
+    // Minimap
+    this.minimap = new Minimap(this.renderer, this.scene, this.camera)
     this.minimap.positionOnScreen(w, h)
-    this.uiContainer.addChild(this.minimap.container)
 
     // Input
     this.bindInput(canvas)
@@ -151,20 +164,28 @@ export class Game {
       if (this.destroyed) return
       const nw = window.innerWidth
       const nh = window.innerHeight
-      this.app.renderer.resize(nw, nh)
+      this.renderer.setSize(nw, nh)
+      this.cssRenderer.setSize(nw, nh)
       this.camera.setScreenSize(nw, nh)
       this.minimap.positionOnScreen(nw, nh)
       this.camera.snapTo(this.playerPos)
     }
     window.addEventListener('resize', this.onResize)
 
-    // Game loop
-    this.tickerCallback = (ticker) => {
+    // Animation loop
+    this.lastTime = performance.now()
+    const animate = () => {
       if (this.destroyed) return
-      const dt = ticker.deltaMS / 1000 // seconds
+      this.animationFrameId = requestAnimationFrame(animate)
+      const now = performance.now()
+      const dt = (now - this.lastTime) / 1000
+      this.lastTime = now
       this.update(dt)
+      this.renderer.render(this.scene, this.camera.threeCamera)
+      this.cssRenderer.render(this.scene, this.camera.threeCamera)
+      this.minimap.render()
     }
-    this.app.ticker.add(this.tickerCallback)
+    animate()
 
     // Initial camera position
     this.camera.snapTo(this.playerPos)
@@ -183,9 +204,7 @@ export class Game {
     this.issueMoveToWorld(worldPos)
   }
 
-  /** Issue a move command to a world position (shared by canvas click & minimap). */
   private issueMoveToWorld(worldPos: WorldPosition): void {
-    // If direct line of sight exists, go straight — avoids grid-snapping jitter
     const fromGrid = this.grid.worldToGrid(this.playerPos)
     const toGrid = this.grid.worldToGrid(worldPos)
     if (hasLineOfSight(this.grid, fromGrid, toGrid)) {
@@ -199,7 +218,6 @@ export class Game {
     if (path && path.length > 0) {
       this.waypoints = path
       this.moveTarget = worldPos
-      // Skip the first waypoint if it's essentially the current position
       if (this.waypoints.length > 1) {
         const first = this.waypoints[0]
         const dx = first.x - this.playerPos.x
@@ -210,29 +228,24 @@ export class Game {
       }
       this.moveIndicator.show(worldPos)
     } else {
-      // Pathfinding failed — clear any stale move state
       this.waypoints = []
       this.moveTarget = null
     }
   }
 
   private bindInput(canvas: HTMLCanvasElement): void {
-    // Prevent default context menu
     this.onContextMenu = (e: MouseEvent) => e.preventDefault()
     canvas.addEventListener('contextmenu', this.onContextMenu)
 
-    // Right mouse button down → start move + track (ignore if on minimap)
     this.onMouseDown = (e: MouseEvent) => {
       if (e.button !== 2 || this.destroyed || this._paused) return
       if (this.minimap.containsScreenPoint(e.clientX, e.clientY)) return
       this.rightMouseDown = true
-      this.lastMoveCommandTime = 0 // reset throttle for immediate response
+      this.lastMoveCommandTime = 0
       this.issueMoveCommand(e.clientX, e.clientY)
     }
     canvas.addEventListener('mousedown', this.onMouseDown)
 
-    // Mouse move → update destination if right-click held + edge-pan camera
-    // Bound to window (not canvas) so it works even after overlay closes
     this.onMouseMove = (e: MouseEvent) => {
       if (this.destroyed || this._paused) return
       this.camera.updateEdgePan(e.clientX, e.clientY)
@@ -242,7 +255,6 @@ export class Game {
     }
     window.addEventListener('mousemove', this.onMouseMove)
 
-    // Right mouse button up → stop tracking
     this.onMouseUp = (e: MouseEvent) => {
       if (e.button !== 2) return
       this.rightMouseDown = false
@@ -260,7 +272,6 @@ export class Game {
     this.onSelectStart = (e: Event) => e.preventDefault()
     canvas.addEventListener('selectstart', this.onSelectStart)
 
-    // Keyboard: escape for settings, arrow keys for pan, space for lock/center
     this.onKeyDown = (e: KeyboardEvent) => {
       if (this.destroyed) return
       const key = e.code
@@ -307,7 +318,6 @@ export class Game {
 
       if (key === 'Space') {
         this.spaceDown = false
-        // Restore Y toggle state instead of always unlocking
         const yLocked = useGameSettingsStore.getState().cameraLocked
         this.camera.setLocked(yLocked)
         return
@@ -331,20 +341,17 @@ export class Game {
   }
 
   private bindMinimapInput(canvas: HTMLCanvasElement): void {
-    // Right-click on minimap → move champion to that world position
     this.minimap.onRightClick = (worldPos) => {
       if (this.destroyed || this._paused) return
       this.lastMoveCommandTime = 0
       this.issueMoveToWorld(worldPos)
     }
 
-    // Left-click on minimap → pan camera smoothly to that world position
     this.minimap.onLeftClick = (worldPos) => {
       if (this.destroyed || this._paused) return
       this.camera.panTo(worldPos)
     }
 
-    // Left-drag on minimap → continuously pan camera (smooth)
     this.minimap.onLeftDrag = (worldPos) => {
       if (this.destroyed || this._paused) return
       this.camera.panTo(worldPos)
@@ -366,15 +373,15 @@ export class Game {
     this.championRenderer.setPosition(this.playerPos)
     this.healthBar.update(this.playerHP / this.playerMaxHP)
 
-    // Minimap (reposition every frame to pick up scale changes from settings)
-    this.minimap.positionOnScreen(this.app.screen.width, this.app.screen.height)
+    // Minimap
+    this.minimap.positionOnScreen(window.innerWidth, window.innerHeight)
     this.minimap.updatePlayerPosition(this.playerPos)
-    this.minimap.updatePath(this.playerPos, this.waypoints)
+    this.minimap.updateMoveTarget(this.moveTarget)
     this.minimap.updateCameraView(
       this.camera.x,
       this.camera.y,
-      this.app.screen.width,
-      this.app.screen.height,
+      window.innerWidth,
+      window.innerHeight,
       this.camera.zoom,
     )
   }
@@ -396,7 +403,7 @@ export class Game {
       return
     }
 
-    // Update facing direction — use final destination for stable orientation
+    // Update facing direction
     const facingRef = this.moveTarget ?? target
     const fdx = facingRef.x - this.playerPos.x
     const fdy = facingRef.y - this.playerPos.y
@@ -422,7 +429,8 @@ export class Game {
   destroy(): void {
     this.destroyed = true
 
-    // Remove event listeners
+    cancelAnimationFrame(this.animationFrameId)
+
     if (this.cleanupMinimapInput) this.cleanupMinimapInput()
     if (this.onResize) window.removeEventListener('resize', this.onResize)
     if (this.onMouseMove) window.removeEventListener('mousemove', this.onMouseMove)
@@ -436,24 +444,25 @@ export class Game {
       if (this.onSelectStart) this.canvas.removeEventListener('selectstart', this.onSelectStart)
     }
 
-    // Explicitly remove ticker before destroying app
-    if (this.tickerCallback && this.app.ticker) {
-      this.app.ticker.remove(this.tickerCallback)
-      this.tickerCallback = null
-    }
-
-    // Explicitly destroy sub-renderers
     this.mapRenderer?.destroy()
     this.minimap?.destroy()
     this.moveIndicator?.destroy()
+    this.championRenderer?.destroy()
+    this.healthBar?.destroy()
+    for (const t of this.towerRenderers) t.destroy()
+    this.cssRenderer?.domElement.remove()
 
-    try {
-      // Only destroy if init() completed (stage exists)
-      if (this.app.stage) {
-        this.app.destroy(false, { children: true })
+    this.scene.traverse((obj) => {
+      if (obj instanceof THREE.Mesh) {
+        obj.geometry.dispose()
+        if (Array.isArray(obj.material)) {
+          obj.material.forEach((m) => m.dispose())
+        } else {
+          obj.material.dispose()
+        }
       }
-    } catch (err) {
-      console.warn('Game.destroy() error (may be pre-init):', err)
-    }
+    })
+
+    this.renderer?.dispose()
   }
 }

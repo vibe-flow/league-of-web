@@ -1,5 +1,6 @@
-import { Application, Container } from 'pixi.js'
-import { type WorldPosition, type SnapshotPayload } from '@template-dev/shared'
+import * as THREE from 'three'
+import { CSS2DRenderer } from 'three/addons/renderers/CSS2DRenderer.js'
+import { type WorldPosition, type SnapshotPayload, type Team } from '@template-dev/shared'
 import { useGameSettingsStore } from '@/stores/game-settings.store'
 import { Camera } from './Camera'
 import { MapRenderer } from '../rendering/MapRenderer'
@@ -11,9 +12,11 @@ import { SnapshotBuffer } from '../network/SnapshotBuffer'
 import { ClockSync } from '../network/ClockSync'
 
 export class GameMultiplayer {
-  private app: Application
-  private gameContainer!: Container
-  private uiContainer!: Container
+  private renderer!: THREE.WebGLRenderer
+  private cssRenderer!: CSS2DRenderer
+  readonly scene = new THREE.Scene()
+  private lastTime = 0
+  private animationFrameId = 0
 
   private camera!: Camera
   private mapRenderer!: MapRenderer
@@ -33,10 +36,22 @@ export class GameMultiplayer {
   private rightMouseDown = false
   private lastMoveCommandTime = 0
   private static readonly MOVE_THROTTLE_MS = 50
+  private lastMoveTarget: WorldPosition | null = null
 
   // Camera pan keys state
   private keysDown = new Set<string>()
   private spaceDown = false
+
+  // Local player team (resolved from first snapshot)
+  private localTeam: Team | null = null
+
+  /** gameTimeMs of the last interpolated "to" snapshot whose events we consumed. */
+  private lastProcessedEventTime = 0
+  /** Whether we've logged the first successful interpolation (debug). */
+  private hasLoggedFirstInterp = false
+
+  // Callback to expose local player snapshot data to React (for HUD)
+  onLocalPlayerUpdate: ((snapshot: SnapshotPayload['entities'][0] | null) => void) | null = null
 
   // Callback to notify React of pause state changes
   onPauseChange: ((paused: boolean) => void) | null = null
@@ -53,7 +68,6 @@ export class GameMultiplayer {
   private onKeyUp: ((e: KeyboardEvent) => void) | null = null
   private cleanupMinimapInput: (() => void) | null = null
   private canvas: HTMLCanvasElement | null = null
-  private tickerCallback: ((ticker: { deltaMS: number }) => void) | null = null
 
   get paused(): boolean {
     return this._paused
@@ -72,7 +86,6 @@ export class GameMultiplayer {
   }
 
   constructor(playerId: string) {
-    this.app = new Application()
     this.localPlayerId = playerId
     this.localEntityId = `champion_${playerId}`
     this.networkClient = new NetworkClient()
@@ -82,6 +95,7 @@ export class GameMultiplayer {
 
   async init(
     canvas: HTMLCanvasElement,
+    container: HTMLDivElement,
     matchId: string,
     serverUrl: string,
     token: string,
@@ -90,51 +104,73 @@ export class GameMultiplayer {
     const w = window.innerWidth
     const h = window.innerHeight
 
-    await this.app.init({
-      canvas,
-      width: w,
-      height: h,
-      backgroundColor: 0x111111,
-      antialias: true,
-      resolution: window.devicePixelRatio || 1,
-      autoDensity: true,
-    })
+    // Three.js WebGL renderer
+    this.renderer = new THREE.WebGLRenderer({ canvas, antialias: true })
+    this.renderer.setPixelRatio(window.devicePixelRatio || 1)
+    this.renderer.setSize(w, h)
+    this.renderer.setClearColor(0x111111)
 
-    // Containers
-    this.gameContainer = new Container()
-    this.gameContainer.label = 'game-world'
-    this.app.stage.addChild(this.gameContainer)
+    // CSS2D renderer for health bars / damage numbers
+    this.cssRenderer = new CSS2DRenderer()
+    this.cssRenderer.setSize(w, h)
+    this.cssRenderer.domElement.style.position = 'absolute'
+    this.cssRenderer.domElement.style.top = '0'
+    this.cssRenderer.domElement.style.left = '0'
+    this.cssRenderer.domElement.style.pointerEvents = 'none'
+    container.appendChild(this.cssRenderer.domElement)
 
-    this.uiContainer = new Container()
-    this.uiContainer.label = 'ui'
-    this.app.stage.addChild(this.uiContainer)
+    // Lighting
+    const ambientLight = new THREE.AmbientLight(0xffffff, 0.7)
+    this.scene.add(ambientLight)
+    const dirLight = new THREE.DirectionalLight(0xffffff, 0.8)
+    dirLight.position.set(3000, 1000, 600)
+    this.scene.add(dirLight)
 
     // Camera
-    this.camera = new Camera(this.gameContainer)
-    this.camera.setScreenSize(w, h)
+    this.camera = new Camera(w, h)
     this.camera.setZoom(0.8)
 
     // Map
     this.mapRenderer = new MapRenderer()
     this.mapRenderer.build()
-    this.gameContainer.addChild(this.mapRenderer.container)
+    this.scene.add(this.mapRenderer.group)
 
     // Move indicator
     this.moveIndicator = new MoveIndicator()
-    this.gameContainer.addChild(this.moveIndicator.graphics)
+    this.scene.add(this.moveIndicator.mesh)
 
-    // Entity manager (handles all champions)
-    this.entityManager = new EntityManager(this.gameContainer)
+    // Entity manager (handles all champions + towers)
+    this.entityManager = new EntityManager(this.scene)
 
     // Minimap
-    this.minimap = new Minimap()
+    this.minimap = new Minimap(this.renderer, this.scene, this.camera)
     this.minimap.positionOnScreen(w, h)
-    this.uiContainer.addChild(this.minimap.container)
 
     // Network
+    let snapshotCount = 0
     this.networkClient.onSnapshot = (snapshot: SnapshotPayload) => {
+      snapshotCount++
       this.snapshotBuffer.push(snapshot)
       this.clockSync.onSnapshot(snapshot.gameTimeMs)
+
+      // Resolve local team directly from the snapshot data
+      if (!this.localTeam) {
+        const localEntity = snapshot.entities.find((e) => e.id === this.localEntityId)
+        if (localEntity) {
+          this.localTeam = localEntity.team
+          console.warn(
+            `[Game] Local player resolved: ${this.localEntityId} team=${localEntity.team}`,
+          )
+        }
+      }
+
+      // Log first few snapshots for debugging
+      if (snapshotCount <= 3) {
+        const localEntity = snapshot.entities.find((e) => e.id === this.localEntityId)
+        console.warn(
+          `[Game] Snapshot #${snapshotCount}: entities=${snapshot.entities.length} localEntity=${localEntity ? `(${localEntity.x.toFixed(0)},${localEntity.y.toFixed(0)})` : 'NOT FOUND'} gameTime=${snapshot.gameTimeMs}`,
+        )
+      }
     }
     this.networkClient.connect(serverUrl, matchId, this.localPlayerId, token)
 
@@ -147,40 +183,69 @@ export class GameMultiplayer {
       if (this.destroyed) return
       const nw = window.innerWidth
       const nh = window.innerHeight
-      this.app.renderer.resize(nw, nh)
+      this.renderer.setSize(nw, nh)
+      this.cssRenderer.setSize(nw, nh)
       this.camera.setScreenSize(nw, nh)
       this.minimap.positionOnScreen(nw, nh)
     }
     window.addEventListener('resize', this.onResize)
 
-    // Render loop
-    this.tickerCallback = (ticker) => {
+    // Animation loop
+    this.lastTime = performance.now()
+    const animate = () => {
       if (this.destroyed) return
-      const dt = ticker.deltaMS / 1000
+      this.animationFrameId = requestAnimationFrame(animate)
+      const now = performance.now()
+      const dt = (now - this.lastTime) / 1000
+      this.lastTime = now
       this.update(dt)
+
+      // Render main scene
+      this.renderer.render(this.scene, this.camera.threeCamera)
+      this.cssRenderer.render(this.scene, this.camera.threeCamera)
+
+      // Render minimap
+      this.minimap.render()
     }
-    this.app.ticker.add(this.tickerCallback)
+    animate()
 
     // Initial camera position — will snap to player once first snapshot arrives
-    this.camera.snapTo({ x: 3000, y: 600 }) // center of map
+    this.camera.snapTo({ x: 3000, y: 600 })
   }
 
   // ===========================================================================
   // Input
   // ===========================================================================
 
-  private issueMoveCommand(screenX: number, screenY: number): void {
+  private issueRightClickCommand(screenX: number, screenY: number): void {
     const now = performance.now()
     if (now - this.lastMoveCommandTime < GameMultiplayer.MOVE_THROTTLE_MS) return
     this.lastMoveCommandTime = now
 
+    if (!this.networkClient.connected) {
+      console.warn('[Game] Right-click ignored: WebSocket not connected')
+      return
+    }
+
     const worldPos = this.camera.screenToWorld(screenX, screenY)
+
+    // Hit test: check if right-clicking on an enemy champion
+    if (this.localTeam) {
+      const targetId = this.entityManager.hitTest(worldPos.x, worldPos.y, this.localTeam)
+      if (targetId) {
+        this.networkClient.sendAttack(targetId)
+        return
+      }
+    }
+
+    // No enemy under cursor — move
     this.issueMoveToWorld(worldPos)
   }
 
   private issueMoveToWorld(worldPos: WorldPosition): void {
     this.networkClient.sendMove(worldPos.x, worldPos.y)
     this.moveIndicator.show(worldPos)
+    this.lastMoveTarget = worldPos
   }
 
   private bindInput(canvas: HTMLCanvasElement): void {
@@ -192,7 +257,7 @@ export class GameMultiplayer {
       if (this.minimap.containsScreenPoint(e.clientX, e.clientY)) return
       this.rightMouseDown = true
       this.lastMoveCommandTime = 0
-      this.issueMoveCommand(e.clientX, e.clientY)
+      this.issueRightClickCommand(e.clientX, e.clientY)
     }
     canvas.addEventListener('mousedown', this.onMouseDown)
 
@@ -200,7 +265,7 @@ export class GameMultiplayer {
       if (this.destroyed || this._paused) return
       this.camera.updateEdgePan(e.clientX, e.clientY)
       if (this.rightMouseDown) {
-        this.issueMoveCommand(e.clientX, e.clientY)
+        this.issueRightClickCommand(e.clientX, e.clientY)
       }
     }
     window.addEventListener('mousemove', this.onMouseMove)
@@ -257,6 +322,12 @@ export class GameMultiplayer {
           const pos = this.entityManager.getEntityPosition(this.localEntityId)
           if (pos) this.camera.snapTo(pos)
         }
+        return
+      }
+
+      if (key === 'KeyS') {
+        e.preventDefault()
+        this.networkClient.sendStop()
         return
       }
 
@@ -327,35 +398,65 @@ export class GameMultiplayer {
     const interpState = this.snapshotBuffer.getInterpolationState(renderTimeMs)
 
     if (interpState) {
-      // Update all entity visuals with interpolation
+      // Only pass events from the "to" snapshot if we haven't processed them yet
+      const toTime = interpState.to.gameTimeMs
+      const events = toTime > this.lastProcessedEventTime ? interpState.to.events : undefined
+      if (events && events.length > 0) {
+        this.lastProcessedEventTime = toTime
+      }
+
+      // Update all entity visuals with interpolation + combat events
       this.entityManager.update(
         interpState.from.entities,
         interpState.to.entities,
         interpState.alpha,
+        dt,
+        events,
       )
+
+      // Notify React of local player state (for HUD)
+      const localSnapshot = this.entityManager.getEntitySnapshot(this.localEntityId)
+      this.onLocalPlayerUpdate?.(localSnapshot)
 
       // Camera follows local player
       const localPos = this.entityManager.getEntityPosition(this.localEntityId)
+
+      if (!this.hasLoggedFirstInterp) {
+        this.hasLoggedFirstInterp = true
+        console.warn(
+          `[Game] First interpolation: alpha=${interpState.alpha.toFixed(2)} entities=${interpState.to.entities.length} localPos=${localPos ? `(${localPos.x.toFixed(0)},${localPos.y.toFixed(0)})` : 'null'}`,
+        )
+      }
+
       if (localPos) {
         this.camera.update(dt, localPos)
       }
 
-      // Update minimap — show local player position
+      // Update minimap — show local player position + move target
       if (localPos) {
         this.minimap.updatePlayerPosition(localPos)
+
+        // Clear move target when player reaches destination
+        if (this.lastMoveTarget) {
+          const dx = localPos.x - this.lastMoveTarget.x
+          const dy = localPos.y - this.lastMoveTarget.y
+          if (dx * dx + dy * dy < 400) {
+            this.lastMoveTarget = null
+          }
+        }
       }
+      this.minimap.updateMoveTarget(this.lastMoveTarget)
     } else {
       // No snapshots yet — just update camera at center
       this.camera.update(dt, { x: 3000, y: 600 })
     }
 
-    // Minimap reposition + camera view
-    this.minimap.positionOnScreen(this.app.screen.width, this.app.screen.height)
+    // Minimap camera view update
     this.minimap.updateCameraView(
       this.camera.x,
       this.camera.y,
-      this.app.screen.width,
-      this.app.screen.height,
+      window.innerWidth,
+      window.innerHeight,
       this.camera.zoom,
     )
   }
@@ -367,6 +468,7 @@ export class GameMultiplayer {
   destroy(): void {
     this.destroyed = true
 
+    cancelAnimationFrame(this.animationFrameId)
     this.networkClient.disconnect()
     this.entityManager?.destroy()
 
@@ -383,24 +485,26 @@ export class GameMultiplayer {
       if (this.onSelectStart) this.canvas.removeEventListener('selectstart', this.onSelectStart)
     }
 
-    // Explicitly remove ticker before destroying app
-    if (this.tickerCallback && this.app.ticker) {
-      this.app.ticker.remove(this.tickerCallback)
-      this.tickerCallback = null
-    }
-
-    // Explicitly destroy sub-renderers
+    // Cleanup sub-renderers
     this.mapRenderer?.destroy()
     this.minimap?.destroy()
     this.moveIndicator?.destroy()
 
-    try {
-      // Only destroy if init() completed (stage exists)
-      if (this.app.stage) {
-        this.app.destroy(false, { children: true })
+    // Remove CSS2D renderer DOM element
+    this.cssRenderer?.domElement.remove()
+
+    // Dispose Three.js resources
+    this.scene.traverse((obj) => {
+      if (obj instanceof THREE.Mesh) {
+        obj.geometry.dispose()
+        if (Array.isArray(obj.material)) {
+          obj.material.forEach((m) => m.dispose())
+        } else {
+          obj.material.dispose()
+        }
       }
-    } catch (err) {
-      console.warn('GameMultiplayer.destroy() error:', err)
-    }
+    })
+
+    this.renderer?.dispose()
   }
 }

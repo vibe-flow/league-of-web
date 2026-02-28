@@ -1,6 +1,9 @@
 import { useEffect, useRef, useState } from 'react'
+import type { ChampionSnapshot } from '@template-dev/shared'
 import { GameMultiplayer } from './core/GameMultiplayer'
 import SettingsMenu from './ui/settings/SettingsMenu'
+import StatsPanel from '@/components/game/StatsPanel'
+import RespawnTimer from '@/components/game/RespawnTimer'
 
 interface Props {
   matchId: string
@@ -10,22 +13,29 @@ interface Props {
 }
 
 export default function GameCanvasMultiplayer({ matchId, playerId, serverUrl, token }: Props) {
+  const containerRef = useRef<HTMLDivElement>(null)
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const gameRef = useRef<GameMultiplayer | null>(null)
   const [settingsOpen, setSettingsOpen] = useState(false)
+  const [localPlayer, setLocalPlayer] = useState<ChampionSnapshot | null>(null)
 
   useEffect(() => {
     const canvas = canvasRef.current
-    if (!canvas) return
+    const container = containerRef.current
+    if (!canvas || !container) return
 
     let game: GameMultiplayer | null = new GameMultiplayer(playerId)
     gameRef.current = game
+
     let cancelled = false
 
     game.onPauseChange = (paused) => setSettingsOpen(paused)
+    game.onLocalPlayerUpdate = (snapshot) => {
+      if (snapshot?.type === 'champion') setLocalPlayer(snapshot)
+    }
 
     game
-      .init(canvas, matchId, serverUrl, token)
+      .init(canvas, container, matchId, serverUrl, token)
       .then(() => {
         if (cancelled) {
           game?.destroy()
@@ -56,15 +66,19 @@ export default function GameCanvasMultiplayer({ matchId, playerId, serverUrl, to
 
   return (
     <>
-      <canvas
-        ref={canvasRef}
-        style={{
-          display: 'block',
-          width: '100vw',
-          height: '100vh',
-          cursor: 'default',
-        }}
-      />
+      <div ref={containerRef} style={{ position: 'relative', width: '100vw', height: '100vh' }}>
+        <canvas
+          ref={canvasRef}
+          style={{
+            display: 'block',
+            width: '100%',
+            height: '100%',
+            cursor: 'default',
+          }}
+        />
+      </div>
+      <StatsPanel player={localPlayer} />
+      <RespawnTimer player={localPlayer} />
       {settingsOpen && <SettingsMenu onClose={handleCloseSettings} />}
     </>
   )

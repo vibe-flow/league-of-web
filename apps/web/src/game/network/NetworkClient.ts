@@ -103,6 +103,10 @@ export class NetworkClient {
     this.sendInput(ClientMessageType.STOP, {})
   }
 
+  sendAttack(targetEntityId: string): void {
+    this.sendInput(ClientMessageType.ATTACK_TARGET, { targetEntityId })
+  }
+
   private sendInput(type: ClientMessageType, payload: unknown): void {
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return
 

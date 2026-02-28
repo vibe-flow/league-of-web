@@ -39,7 +39,7 @@ export class SnapshotBuffer {
     const to = this.snapshots[this.snapshots.length - 1]
     const range = to.gameTimeMs - from.gameTimeMs
     const alpha = range > 0 ? (renderTimeMs - from.gameTimeMs) / range : 1
-    return { from, to, alpha: Math.min(alpha, 1.5) }
+    return { from, to, alpha: Math.min(alpha, 1) }
   }
 
   get length(): number {
