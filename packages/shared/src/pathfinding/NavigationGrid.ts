@@ -84,6 +84,26 @@ export class NavigationGrid {
     }
   }
 
+  /** Make cells within a circle walkable again (e.g. after a tower is destroyed). */
+  unblockCircle(center: { x: number; y: number }, radius: number): void {
+    const minGX = Math.max(0, Math.floor((center.x - radius) / this.cellSize))
+    const maxGX = Math.min(this.gridWidth - 1, Math.ceil((center.x + radius) / this.cellSize))
+    const minGY = Math.max(0, Math.floor((center.y - radius) / this.cellSize))
+    const maxGY = Math.min(this.gridHeight - 1, Math.ceil((center.y + radius) / this.cellSize))
+
+    for (let gy = minGY; gy <= maxGY; gy++) {
+      for (let gx = minGX; gx <= maxGX; gx++) {
+        const cx = (gx + 0.5) * this.cellSize
+        const cy = (gy + 0.5) * this.cellSize
+        const dx = cx - center.x
+        const dy = cy - center.y
+        if (dx * dx + dy * dy <= radius * radius) {
+          this.cells[gy * this.gridWidth + gx] |= CELL_WALKABLE
+        }
+      }
+    }
+  }
+
   isWalkable(gx: number, gy: number): boolean {
     if (gx < 0 || gx >= this.gridWidth || gy < 0 || gy >= this.gridHeight) {
       return false

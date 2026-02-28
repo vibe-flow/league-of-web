@@ -22,6 +22,110 @@ export const BLUE_SPAWN = { x: 550, y: 600 } as const
 export const RED_SPAWN = { x: 5450, y: 600 } as const
 
 // =============================================================================
+// Tower / Nexus stats & definitions
+// =============================================================================
+
+export type TowerTier = 'outer' | 'inner' | 'inhibitor'
+
+export const TOWER_STATS: Record<
+  TowerTier,
+  { hp: number; ad: number; armor: number; magicResist: number; attackRange: number }
+> = {
+  outer: { hp: 3500, ad: 150, armor: 40, magicResist: 40, attackRange: 800 },
+  inner: { hp: 3800, ad: 175, armor: 50, magicResist: 50, attackRange: 800 },
+  inhibitor: { hp: 4000, ad: 200, armor: 60, magicResist: 60, attackRange: 800 },
+} as const
+
+export const NEXUS_STATS = {
+  hp: 5500,
+  armor: 50,
+  magicResist: 50,
+} as const
+
+export interface TowerDefinition {
+  id: string
+  team: 'blue' | 'red'
+  tier: TowerTier | 'nexus'
+  position: { x: number; y: number }
+  radius: number
+  /** Destruction order per team: 0=outer, 1=inner, 2=inhibitor, 3=nexus */
+  orderIndex: number
+}
+
+/**
+ * All structures on the map. orderIndex 0 is the first tower the enemy team
+ * must destroy (closest to center), increasing toward the nexus.
+ */
+export const TOWER_DEFINITIONS: TowerDefinition[] = [
+  // Blue side — red team attacks these from center→base (B1 first)
+  {
+    id: 'tower_blue_0',
+    team: 'blue',
+    tier: 'outer',
+    position: { x: 2100, y: 600 },
+    radius: TURRET_RADIUS,
+    orderIndex: 0,
+  },
+  {
+    id: 'tower_blue_1',
+    team: 'blue',
+    tier: 'inner',
+    position: { x: 1500, y: 600 },
+    radius: TURRET_RADIUS,
+    orderIndex: 1,
+  },
+  {
+    id: 'tower_blue_2',
+    team: 'blue',
+    tier: 'inhibitor',
+    position: { x: 800, y: 600 },
+    radius: TURRET_RADIUS,
+    orderIndex: 2,
+  },
+  {
+    id: 'nexus_blue',
+    team: 'blue',
+    tier: 'nexus',
+    position: { x: 300, y: 600 },
+    radius: NEXUS_RADIUS,
+    orderIndex: 3,
+  },
+  // Red side — blue team attacks these from center→base (A1 first)
+  {
+    id: 'tower_red_0',
+    team: 'red',
+    tier: 'outer',
+    position: { x: 3900, y: 600 },
+    radius: TURRET_RADIUS,
+    orderIndex: 0,
+  },
+  {
+    id: 'tower_red_1',
+    team: 'red',
+    tier: 'inner',
+    position: { x: 4500, y: 600 },
+    radius: TURRET_RADIUS,
+    orderIndex: 1,
+  },
+  {
+    id: 'tower_red_2',
+    team: 'red',
+    tier: 'inhibitor',
+    position: { x: 5200, y: 600 },
+    radius: TURRET_RADIUS,
+    orderIndex: 2,
+  },
+  {
+    id: 'nexus_red',
+    team: 'red',
+    tier: 'nexus',
+    position: { x: 5700, y: 600 },
+    radius: NEXUS_RADIUS,
+    orderIndex: 3,
+  },
+]
+
+// =============================================================================
 // Map definition — obstacles, bushes, bases
 // =============================================================================
 

@@ -8,5 +8,8 @@ export * from './schemas/lobby.schema'
 // Game
 export * from './game'
 
+// Champions
+export * from './champions'
+
 // Pathfinding
 export * from './pathfinding'
