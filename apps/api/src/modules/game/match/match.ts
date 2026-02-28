@@ -67,6 +67,7 @@ export class Match {
     switch (msg.type) {
       case ClientMessageType.MOVE_TO:
       case ClientMessageType.STOP:
+      case ClientMessageType.ATTACK_TARGET:
         this.inputQueue.enqueue({
           playerId,
           type: msg.type,

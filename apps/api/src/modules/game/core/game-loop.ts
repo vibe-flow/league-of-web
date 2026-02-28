@@ -88,16 +88,25 @@ export class GameLoop {
     // 1. Drain input queue
     const inputs = this.inputQueue.drain()
 
-    // 2. Process inputs (validate + apply move commands)
+    // 2. Process inputs (validate + apply move/attack commands)
     this.state.processInputs(inputs)
 
     // 3. Update movement
     this.state.updateMovement(TICK_DURATION_S)
 
-    // 4. Capture snapshot
+    // 4. Update combat (auto-attacks, damage pipeline)
+    this.state.updateCombat(TICK_DURATION_MS)
+
+    // 5. Update XP and regeneration
+    this.state.updateRegenAndXp(TICK_DURATION_S)
+
+    // 6. Check death and respawn (pass dtMs for respawn timer countdown)
+    this.state.checkDeathAndRespawn(TICK_DURATION_MS)
+
+    // 7. Capture snapshot (includes pending events, then clears them)
     const snapshot = this.state.captureSnapshot(this.tickNumber, this.gameTimeMs)
 
-    // 5. Broadcast to clients
+    // 8. Broadcast to clients
     this.onSnapshot(snapshot)
   }
 
