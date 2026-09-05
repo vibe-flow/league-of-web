@@ -27,6 +27,7 @@ export interface LobbyPlayer {
   userId: string
   team: Team
   ready: boolean
+  championType?: string
 }
 
 export interface LobbyState {

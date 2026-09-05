@@ -22,6 +22,14 @@ export interface AnimationMapping {
   attacking: string
   dead: string
   respawning?: string
+  spell1: string
+  spell2: string
+  spell3: string
+  spell4: string
+  dance?: string
+  joke?: string
+  taunt?: string
+  laugh?: string
 }
 
 /** Default mapping for LoL Model Viewer GLB files. */
@@ -31,6 +39,14 @@ export const DEFAULT_ANIMATION_MAP: AnimationMapping = {
   attacking: 'Attack1',
   dead: 'Death',
   respawning: 'Idle1',
+  spell1: 'Spell1',
+  spell2: 'Spell2',
+  spell3: 'Spell3',
+  spell4: 'Spell4',
+  dance: 'Dance',
+  joke: 'Joke',
+  taunt: 'Taunt',
+  laugh: 'Laugh',
 }
 
 /** Per-champion overrides when clip names differ from defaults. */

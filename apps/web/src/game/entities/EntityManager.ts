@@ -2,6 +2,8 @@ import type * as THREE from 'three'
 import {
   COLORS,
   DEFAULT_CHAMPION_RADIUS,
+  EntityState,
+  getBaseSkinId,
   type EntitySnapshot,
   type ChampionSnapshot,
   type TowerSnapshot,
@@ -9,24 +11,37 @@ import {
   type Team,
 } from '@template-dev/shared'
 import { ChampionRenderer3D } from '../rendering/ChampionRenderer3D'
+import { AnimationController } from '../rendering/AnimationController'
 import { TowerRenderer3D } from '../rendering/TowerRenderer3D'
 import { HealthBar } from '../rendering/HealthBar'
-import { LevelBadge } from '../rendering/LevelBadge'
 import { DamageNumberManager } from '../rendering/DamageNumber'
+import { AssetManager } from '../assets/AssetManager'
+import { ASSET_TURRET, ASSET_NEXUS } from '../assets/asset-paths'
+import { useGameSettingsStore } from '@/stores/game-settings.store'
+
+/**
+ * Smoothing factor for position (per-second exponential lerp).
+ * Very high so it converges in ~2-3 frames — just enough to absorb
+ * discontinuities when transitioning between snapshot pairs.
+ */
+const POSITION_SMOOTH = 25
+const FACING_SMOOTH = 20
 
 interface EntityView {
   id: string
   type: 'champion' | 'tower'
   renderer: ChampionRenderer3D | TowerRenderer3D
+  animController: AnimationController | null
   healthBar: HealthBar
-  levelBadge: LevelBadge | null
   team: Team
-  /** Hit radius for this entity (used for damage number offset). */
   radius: number
-  /** Previous alive state for detecting death/respawn transitions. */
   wasAlive: boolean
-  /** Previous HP for detecting damage taken. */
   prevHp: number
+  /** Smoothed render position (game coords). */
+  renderX: number
+  renderY: number
+  /** Smoothed render facing (radians). */
+  renderFacing: number
 }
 
 function lerp(a: number, b: number, t: number): number {
@@ -35,7 +50,6 @@ function lerp(a: number, b: number, t: number): number {
 
 function lerpAngle(a: number, b: number, t: number): number {
   let diff = b - a
-  // Normalize to [-PI, PI]
   while (diff > Math.PI) diff -= 2 * Math.PI
   while (diff < -Math.PI) diff += 2 * Math.PI
   return a + diff * t
@@ -44,16 +58,14 @@ function lerpAngle(a: number, b: number, t: number): number {
 export class EntityManager {
   private entities = new Map<string, EntityView>()
   private damageNumbers: DamageNumberManager
-  /** Cache of the latest "to" snapshot for hit testing. */
   private latestSnapshot: EntitySnapshot[] = []
+  localEntityId: string | null = null
+  localTeam: Team | null = null
 
   constructor(private readonly scene: THREE.Scene) {
     this.damageNumbers = new DamageNumberManager(scene)
   }
 
-  /**
-   * Update all entity visuals by interpolating between two snapshots.
-   */
   update(
     fromEntities: EntitySnapshot[],
     toEntities: EntitySnapshot[],
@@ -62,6 +74,14 @@ export class EntityManager {
     events?: GameEvent[],
   ): void {
     this.latestSnapshot = toEntities
+
+    if (!this.localTeam && this.localEntityId) {
+      const localEntity = toEntities.find((e) => e.id === this.localEntityId)
+      if (localEntity) {
+        this.localTeam = localEntity.team
+      }
+    }
+
     const activeIds = new Set<string>()
 
     for (const toEntity of toEntities) {
@@ -73,30 +93,38 @@ export class EntityManager {
         this.entities.set(toEntity.id, view)
       }
 
-      // Find matching entity in "from" snapshot
       const fromEntity = fromEntities.find((e) => e.id === toEntity.id)
 
-      let x: number, y: number
+      // Interpolate (or extrapolate) position from snapshot pair
+      let targetX: number, targetY: number
       if (fromEntity) {
-        x = lerp(fromEntity.x, toEntity.x, alpha)
-        y = lerp(fromEntity.y, toEntity.y, alpha)
+        targetX = lerp(fromEntity.x, toEntity.x, alpha)
+        targetY = lerp(fromEntity.y, toEntity.y, alpha)
       } else {
-        x = toEntity.x
-        y = toEntity.y
+        targetX = toEntity.x
+        targetY = toEntity.y
       }
 
-      view.renderer.setPosition({ x, y })
+      // Light smoothing to absorb discontinuities at snapshot-pair transitions
+      const posFactor = Math.min(1, POSITION_SMOOTH * dt)
+      view.renderX = lerp(view.renderX, targetX, posFactor)
+      view.renderY = lerp(view.renderY, targetY, posFactor)
+
+      view.renderer.setPosition({ x: view.renderX, y: view.renderY })
       view.renderer.updateFlash(dt)
-      view.healthBar.update(toEntity.hp / toEntity.maxHp)
+      view.healthBar.update(toEntity.hp / toEntity.maxHp, toEntity.hp, toEntity.maxHp)
 
       // Champion-specific updates
       if (toEntity.type === 'champion') {
         const fromChamp = fromEntity as ChampionSnapshot | undefined
-        const facing = fromChamp
+        const targetFacing = fromChamp
           ? lerpAngle(fromChamp.facing, toEntity.facing, alpha)
           : toEntity.facing
-        view.renderer.setFacing(facing)
-        view.levelBadge?.setLevel(toEntity.level)
+
+        const faceFactor = Math.min(1, FACING_SMOOTH * dt)
+        view.renderFacing = lerpAngle(view.renderFacing, targetFacing, faceFactor)
+        view.renderer.setFacing(view.renderFacing)
+        view.healthBar.setLevel(toEntity.level)
 
         // Attack animation
         if (toEntity.state === 'attacking' && toEntity.attackPhase) {
@@ -105,29 +133,32 @@ export class EntityManager {
           view.renderer.setAttacking(false)
         }
 
-        // Update GLB animation (if loaded)
-        if (view.renderer instanceof ChampionRenderer3D) {
-          view.renderer.updateAnimation(dt)
+        // Drive animation state from server snapshot
+        if (view.animController) {
+          const stateMap: Record<string, EntityState> = {
+            idle: EntityState.Idle,
+            moving: EntityState.Moving,
+            attacking: EntityState.Attacking,
+            dead: EntityState.Dead,
+            respawning: EntityState.Respawning,
+          }
+          view.animController.setState(stateMap[toEntity.state] ?? EntityState.Idle)
+          view.animController.update(dt)
         }
       }
 
       // --- Combat visual feedback ---
-
-      // Death/respawn transitions
       if (toEntity.alive && !view.wasAlive) {
         view.renderer.setDead(false)
       } else if (!toEntity.alive && view.wasAlive) {
         view.renderer.setDead(true)
       }
 
-      // Damage flash (HP decreased)
       if (toEntity.hp < view.prevHp && toEntity.alive) {
         view.renderer.flashDamage()
       }
 
-      // Always show entity (alive or dead with death visual)
       view.renderer.group.visible = true
-
       view.wasAlive = toEntity.alive
       view.prevHp = toEntity.hp
     }
@@ -140,7 +171,7 @@ export class EntityManager {
           if (targetView) {
             this.damageNumbers.spawn(
               targetView.renderer.group.position.x,
-              targetView.renderer.group.position.z, // game Y = Three.js Z
+              targetView.renderer.group.position.z,
               event.amount,
               event.damageType,
             )
@@ -149,15 +180,12 @@ export class EntityManager {
       }
     }
 
-    // Update floating damage numbers
     this.damageNumbers.update(dt)
 
-    // Remove entities that are no longer in the snapshot
     for (const [id, view] of this.entities) {
       if (!activeIds.has(id)) {
         view.renderer.destroy()
         view.healthBar.destroy()
-        view.levelBadge?.destroy()
         this.entities.delete(id)
       }
     }
@@ -171,80 +199,123 @@ export class EntityManager {
   }
 
   private createChampionView(entity: ChampionSnapshot): EntityView {
-    const color = entity.team === 'blue' ? COLORS.CHAMPION_BLUE : COLORS.CHAMPION_RED
+    const isAlly = this.localTeam === entity.team
+    const color = isAlly ? COLORS.CHAMPION_BLUE : COLORS.CHAMPION_RED
     const renderer = new ChampionRenderer3D(color)
-    const healthBar = new HealthBar()
-    const levelBadge = new LevelBadge()
-    // Add health bar and level badge as children of the champion group
+    const animController = new AnimationController(renderer, entity.championType)
+    const side = isAlly ? 'ally' : 'enemy'
+    const healthBar = new HealthBar(side)
+    healthBar.setName(entity.championType)
     renderer.group.add(healthBar.object)
-    renderer.group.add(levelBadge.object)
     this.scene.add(renderer.group)
+
+    this.loadChampionGLB(entity.id, renderer)
+
     return {
       id: entity.id,
       type: 'champion',
       renderer,
+      animController,
       healthBar,
-      levelBadge,
       team: entity.team,
       radius: DEFAULT_CHAMPION_RADIUS,
       wasAlive: entity.alive,
       prevHp: entity.hp,
+      renderX: entity.x,
+      renderY: entity.y,
+      renderFacing: entity.facing,
+    }
+  }
+
+  private async loadChampionGLB(entityId: string, renderer: ChampionRenderer3D): Promise<void> {
+    const { selectedChampion, selectedSkin } = useGameSettingsStore.getState()
+    const isLocal = entityId === this.localEntityId
+    const alias = isLocal ? selectedChampion : selectedChampion
+    const skinId = isLocal ? selectedSkin : (getBaseSkinId(selectedChampion) ?? selectedSkin)
+
+    if (!alias || !skinId) return
+
+    try {
+      const manager = AssetManager.getInstance()
+      await manager.preloadChampion(alias, skinId)
+      if (!this.entities.has(entityId)) return
+      const result = manager.getChampionModel(alias, skinId)
+      if (result) {
+        renderer.setGLBModel(result.model, result.animations)
+      }
+    } catch (err) {
+      console.warn(`[EntityManager] Failed to load GLB for ${entityId}:`, err)
     }
   }
 
   private createTowerView(entity: TowerSnapshot): EntityView {
-    const renderer = new TowerRenderer3D(entity.team, entity.tier, entity.radius)
+    const isAlly = this.localTeam === entity.team
+    const displayTeam = isAlly ? 'blue' : 'red'
+    const renderer = new TowerRenderer3D(displayTeam, entity.tier, entity.radius)
     const barWidth = entity.tier === 'nexus' ? 160 : 120
-    const healthBar = new HealthBar(barWidth, -(entity.radius + 16))
+    const side = isAlly ? 'ally' : 'enemy'
+    const healthBar = new HealthBar(side, barWidth)
     renderer.group.add(healthBar.object)
     this.scene.add(renderer.group)
+
+    this.loadTowerGLB(entity.id, entity.tier, renderer)
+
     return {
       id: entity.id,
       type: 'tower',
       renderer,
+      animController: null,
       healthBar,
-      levelBadge: null,
       team: entity.team,
       radius: entity.radius,
       wasAlive: entity.alive,
       prevHp: entity.hp,
+      renderX: entity.x,
+      renderY: entity.y,
+      renderFacing: 0,
     }
   }
 
-  /**
-   * Hit test: check if world coordinates overlap an enemy entity.
-   * Champions are prioritized over towers.
-   * Returns the entity ID if found, null otherwise.
-   */
+  private async loadTowerGLB(
+    entityId: string,
+    tier: string,
+    renderer: TowerRenderer3D,
+  ): Promise<void> {
+    const assetDef = tier === 'nexus' ? ASSET_NEXUS : ASSET_TURRET
+    try {
+      const manager = AssetManager.getInstance()
+      await manager.preloadAsset(assetDef.key, assetDef.path)
+      if (!this.entities.has(entityId)) return
+      const clone = manager.getAssetClone(assetDef.key)
+      if (clone) {
+        renderer.setGLBModel(clone.model)
+      }
+    } catch (err) {
+      console.warn(`[EntityManager] Failed to load tower GLB for ${entityId}:`, err)
+    }
+  }
+
   hitTest(worldX: number, worldY: number, localTeam: Team): string | null {
-    // First pass: check champions
     for (const entity of this.latestSnapshot) {
       if (entity.type !== 'champion') continue
       if (entity.team === localTeam) continue
       if (!entity.alive) continue
-
       const dx = worldX - entity.x
       const dy = worldY - entity.y
-      const distSq = dx * dx + dy * dy
-      if (distSq <= DEFAULT_CHAMPION_RADIUS * DEFAULT_CHAMPION_RADIUS) {
+      if (dx * dx + dy * dy <= DEFAULT_CHAMPION_RADIUS * DEFAULT_CHAMPION_RADIUS) {
         return entity.id
       }
     }
-
-    // Second pass: check towers
     for (const entity of this.latestSnapshot) {
       if (entity.type !== 'tower') continue
       if (entity.team === localTeam) continue
       if (!entity.alive) continue
-
       const dx = worldX - entity.x
       const dy = worldY - entity.y
-      const distSq = dx * dx + dy * dy
-      if (distSq <= entity.radius * entity.radius) {
+      if (dx * dx + dy * dy <= entity.radius * entity.radius) {
         return entity.id
       }
     }
-
     return null
   }
 
@@ -257,22 +328,30 @@ export class EntityManager {
     return this.latestSnapshot.find((e) => e.id === entityId) ?? null
   }
 
-  /**
-   * Get the interpolated position of a specific entity from the latest update.
-   * Returns game-world coordinates (x, y).
-   */
   getEntityPosition(entityId: string): { x: number; y: number } | null {
     const view = this.entities.get(entityId)
     if (!view) return null
-    // Three.js Z → game Y
     return { x: view.renderer.group.position.x, y: view.renderer.group.position.z }
+  }
+
+  setEntityHeight(y: number): void {
+    for (const view of this.entities.values()) {
+      view.renderer.group.position.y = y
+    }
+  }
+
+  setStructureScale(scale: number): void {
+    for (const view of this.entities.values()) {
+      if (view.type === 'tower') {
+        ;(view.renderer as TowerRenderer3D).setStructureScale(scale)
+      }
+    }
   }
 
   destroy(): void {
     for (const view of this.entities.values()) {
       view.renderer.destroy()
       view.healthBar.destroy()
-      view.levelBadge?.destroy()
     }
     this.entities.clear()
     this.damageNumbers.destroy()

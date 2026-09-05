@@ -1,5 +1,6 @@
 import * as THREE from 'three'
 import { COLORS, type WorldPosition } from '@template-dev/shared'
+import { useGameSettingsStore } from '@/stores/game-settings.store'
 
 /** A small animated ring that appears where the player clicks to move. */
 export class MoveIndicator {
@@ -27,6 +28,7 @@ export class MoveIndicator {
 
   show(pos: WorldPosition): void {
     this.mesh.position.x = pos.x
+    this.mesh.position.y = 0.1 + useGameSettingsStore.getState().championHeight
     this.mesh.position.z = pos.y // game Y → Three.js Z
     this.mesh.visible = true
     this.active = true

@@ -5,6 +5,9 @@ import {
   type WorldPosition,
   type AttackPhase,
 } from '@template-dev/shared'
+import { useGameSettingsStore } from '@/stores/game-settings.store'
+
+const DEG2RAD = Math.PI / 180
 
 export class ChampionRenderer3D {
   readonly group = new THREE.Group()
@@ -25,6 +28,7 @@ export class ChampionRenderer3D {
   private animations = new Map<string, THREE.AnimationAction>()
   private currentAction: THREE.AnimationAction | null = null
   private glbModel: THREE.Group | null = null
+  private baseScale = 1 // computed auto-scale before user multiplier
 
   constructor(color: number = COLORS.CHAMPION_BLUE) {
     this.originalColor = new THREE.Color(color)
@@ -40,21 +44,6 @@ export class ChampionRenderer3D {
     this.body = new THREE.Mesh(bodyGeo, this.bodyMaterial)
     this.body.position.y = 10 // half height above ground
     this.group.add(this.body)
-
-    // Outline ring
-    const outlineGeo = new THREE.RingGeometry(
-      DEFAULT_CHAMPION_RADIUS - 1,
-      DEFAULT_CHAMPION_RADIUS + 2,
-      32,
-    )
-    const outlineMat = new THREE.MeshBasicMaterial({
-      color: 0x000000,
-      side: THREE.DoubleSide,
-    })
-    const outline = new THREE.Mesh(outlineGeo, outlineMat)
-    outline.rotation.x = -Math.PI / 2
-    outline.position.y = 20.1
-    this.group.add(outline)
 
     // Direction arrow — cone pointing in +X direction
     const arrowGeo = new THREE.ConeGeometry(8, 25, 8)
@@ -88,6 +77,7 @@ export class ChampionRenderer3D {
 
   setPosition(pos: WorldPosition): void {
     this.group.position.x = pos.x
+    this.group.position.y = useGameSettingsStore.getState().championHeight
     this.group.position.z = pos.y // game Y → Three.js Z
   }
 
@@ -95,11 +85,18 @@ export class ChampionRenderer3D {
     this._facing = angle
     // Rotate the entire group around Y axis
     // In Three.js XZ plane: angle 0 = +X, PI/2 = +Z
-    this.group.rotation.y = -angle
+    // Add modelRotationOffset to compensate for GLB model's intrinsic orientation
+    const offset = useGameSettingsStore.getState().modelRotationOffset * DEG2RAD
+    this.group.rotation.y = -angle + offset
   }
 
   get facing(): number {
     return this._facing
+  }
+
+  /** Whether a GLB model with animations is loaded. */
+  get hasModel(): boolean {
+    return this.mixer !== null
   }
 
   /** Flash the champion red when taking damage (~150ms). */
@@ -190,24 +187,191 @@ export class ChampionRenderer3D {
     this.mixer?.update(dt)
   }
 
-  /** Play an animation by state name. */
-  playAnimation(clipName: string): void {
+  /**
+   * Find an animation action by exact name, then by prefix/fuzzy match.
+   * LoL GLB clips have varying naming conventions:
+   *   "Run", "Run_Base", "Run_Fast", "Attack1.ASU_Teemo.anm", etc.
+   * This finds the best match for a requested clip name.
+   */
+  private findAction(clipName: string): THREE.AnimationAction | null {
+    // 1. Exact match
+    const exact = this.animations.get(clipName)
+    if (exact) return exact
+
+    // 2. Case-insensitive exact match
+    const lowerName = clipName.toLowerCase()
+    for (const [key, action] of this.animations) {
+      if (key.toLowerCase() === lowerName) return action
+    }
+
+    // 3. Prefix match: "Run" matches "Run_Base", "Run_Fast"
+    //    "Attack1" matches "Attack1.ASU_Teemo.anm"
+    for (const [key, action] of this.animations) {
+      const lowerKey = key.toLowerCase()
+      if (lowerKey.startsWith(lowerName + '_') || lowerKey.startsWith(lowerName + '.')) {
+        return action
+      }
+    }
+
+    // 4. Suffix/contains match for base names: "Idle1" in "Idle1_Base"
+    for (const [key, action] of this.animations) {
+      if (key.toLowerCase().startsWith(lowerName)) {
+        return action
+      }
+    }
+
+    return null
+  }
+
+  /** Play an animation by state name with configurable crossfade duration. */
+  playAnimation(clipName: string, fadeTime = 0.15): void {
     if (!this.mixer) return
-    const action = this.animations.get(clipName)
+    const action = this.findAction(clipName)
     if (!action || action === this.currentAction) return
 
     if (this.currentAction) {
-      this.currentAction.fadeOut(0.2)
+      this.currentAction.fadeOut(fadeTime)
     }
-    action.reset().fadeIn(0.2).play()
+    action.reset().fadeIn(fadeTime).play()
     this.currentAction = action
   }
 
-  /** Set GLB model (called by AssetManager integration in Phase 6). */
+  /**
+   * Play a one-shot animation (spell), then return to idle.
+   * If `onComplete` is provided, it is called when the animation finishes
+   * instead of the default "fade back to idle" behavior.
+   */
+  playOneShotAnimation(clipName: string, onComplete?: () => void, fadeTime = 0.1): void {
+    if (!this.mixer) {
+      onComplete?.()
+      return
+    }
+    const action = this.findAction(clipName)
+    if (!action) {
+      onComplete?.()
+      return
+    }
+
+    action.reset()
+    action.setLoop(THREE.LoopOnce, 1)
+    action.clampWhenFinished = true
+
+    if (this.currentAction) {
+      this.currentAction.fadeOut(fadeTime)
+    }
+    action.fadeIn(fadeTime).play()
+    this.currentAction = action
+
+    const onFinished = (e: { action: THREE.AnimationAction }) => {
+      if (e.action === action) {
+        this.mixer?.removeEventListener('finished', onFinished)
+        if (onComplete) {
+          action.fadeOut(fadeTime)
+          onComplete()
+        } else {
+          const idleAction = this.findAction('Idle1')
+          if (idleAction) {
+            action.fadeOut(fadeTime)
+            idleAction.reset().fadeIn(fadeTime).play()
+            this.currentAction = idleAction
+          }
+        }
+      }
+    }
+    this.mixer.addEventListener('finished', onFinished)
+  }
+
+  /** Apply user-controlled scale multiplier on top of the auto-computed base scale. */
+  setModelScale(multiplier: number): void {
+    if (this.glbModel) {
+      this.glbModel.scale.setScalar(this.baseScale * multiplier)
+    }
+  }
+
+  /** Set GLB model with auto-scaling to fit champion radius. */
   setGLBModel(model: THREE.Group, animations: THREE.AnimationClip[]): void {
+    // Remove previous GLB model if swapping
+    if (this.glbModel) {
+      this.group.remove(this.glbModel)
+      this.mixer?.stopAllAction()
+      this.mixer = null
+      this.animations.clear()
+      this.currentAction = null
+    }
+
     // Hide placeholder geometry
     this.body.visible = false
     this.arrow.visible = false
+
+    // Reset any prior transforms on the model root
+    model.scale.setScalar(1)
+    model.position.set(0, 0, 0)
+    model.rotation.set(0, 0, 0)
+    model.updateMatrixWorld(true)
+
+    // Compute bounding box from raw geometry (not skinned pose which can be huge)
+    const box = new THREE.Box3()
+    model.traverse((child) => {
+      if ((child as THREE.Mesh).isMesh) {
+        const mesh = child as THREE.Mesh
+        mesh.geometry.computeBoundingBox()
+        if (mesh.geometry.boundingBox) {
+          const meshBox = mesh.geometry.boundingBox.clone()
+          meshBox.applyMatrix4(mesh.matrixWorld)
+          box.union(meshBox)
+        }
+      }
+    })
+
+    // Fallback if no meshes found
+    if (box.isEmpty()) {
+      box.setFromObject(model)
+    }
+
+    const size = new THREE.Vector3()
+    box.getSize(size)
+    const height = size.y
+    console.log(
+      `[ChampionRenderer3D] Raw model size: ${size.x.toFixed(1)} x ${size.y.toFixed(1)} x ${size.z.toFixed(1)}`,
+    )
+
+    if (height > 0) {
+      // The game uses large world units (champion radius = 50, map ~14000x14000)
+      // A visible champion model should be around 200 game units tall
+      const targetHeight = 200
+      this.baseScale = targetHeight / height
+      model.scale.setScalar(this.baseScale)
+      console.log(
+        `[ChampionRenderer3D] Scale: ${this.baseScale.toFixed(6)} (raw height=${height.toFixed(1)} → target=${targetHeight})`,
+      )
+    }
+
+    // Update world matrices after scaling
+    model.updateMatrixWorld(true)
+
+    // Recompute bounding box after scaling (using geometry, not skinned pose)
+    const scaledBox = new THREE.Box3()
+    model.traverse((child2) => {
+      if ((child2 as THREE.Mesh).isMesh) {
+        const m = child2 as THREE.Mesh
+        m.geometry.computeBoundingBox()
+        if (m.geometry.boundingBox) {
+          const mb = m.geometry.boundingBox.clone()
+          mb.applyMatrix4(m.matrixWorld)
+          scaledBox.union(mb)
+        }
+      }
+    })
+    if (scaledBox.isEmpty()) {
+      scaledBox.setFromObject(model)
+    }
+    const center = new THREE.Vector3()
+    scaledBox.getCenter(center)
+
+    // Center horizontally, sit on ground
+    model.position.x -= center.x
+    model.position.z -= center.z
+    model.position.y -= scaledBox.min.y // bottom of model at y=0
 
     // Setup animation mixer
     this.mixer = new THREE.AnimationMixer(model)
@@ -215,8 +379,15 @@ export class ChampionRenderer3D {
       const action = this.mixer.clipAction(clip)
       this.animations.set(clip.name, action)
     }
-
+    this.glbModel = model
     this.group.add(model)
+
+    // Auto-play idle animation if available
+    const idleAction = this.findAction('Idle1')
+    if (idleAction) {
+      idleAction.reset().play()
+      this.currentAction = idleAction
+    }
   }
 
   destroy(): void {

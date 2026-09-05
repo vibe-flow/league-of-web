@@ -65,6 +65,8 @@ export interface ChampionSnapshot {
   maxMp: number
   team: Team
   alive: boolean
+  // Champion identity
+  championType: string
   // Combat state
   state: EntityState
   attackPhase?: AttackPhase
@@ -74,9 +76,15 @@ export interface ChampionSnapshot {
   xp: number
   xpToNextLevel: number
   ad: number
+  ap: number
   armor: number
   magicResist: number
   attackSpeed: number
+  moveSpeed: number
+  attackRange: number
+  hpRegen: number
+  mpRegen: number
+  critChance: number
   // Death
   respawnTimerMs?: number
 }

@@ -8,6 +8,7 @@ import {
   ClientMessageType,
   EntityState,
   DefaultChampion,
+  getChampionDefinition,
   PASSIVE_XP_PER_SECOND,
   KILL_XP_BASE,
   KILL_XP_PER_VICTIM_LEVEL,
@@ -55,6 +56,7 @@ export interface Attackable {
 
 export interface ChampionEntity extends Attackable {
   playerId: string
+  championType: string
   facing: number
   mp: number
   maxMp: number
@@ -90,12 +92,16 @@ export class GameState {
     // Spawn champions
     for (const player of config.players) {
       const spawn = player.team === 'blue' ? BLUE_SPAWN : RED_SPAWN
-      const champStats = new ChampionStats(DefaultChampion)
+      const definition = getChampionDefinition(player.championType) ?? DefaultChampion
+      const champStats = new ChampionStats(definition)
       const effective = champStats.effectiveStats
+
+      this.logger.log(`Spawning ${player.playerId} as ${definition.name} (${player.championType})`)
 
       const entity: ChampionEntity = {
         id: `champion_${player.playerId}`,
         playerId: player.playerId,
+        championType: player.championType,
         team: player.team,
         x: spawn.x,
         y: spawn.y,
@@ -280,11 +286,16 @@ export class GameState {
         continue
       }
 
-      // Update facing
-      const facingRef = entity.moveTarget ?? target
-      const fdx = facingRef.x - entity.x
-      const fdy = facingRef.y - entity.y
-      entity.facing = Math.atan2(fdy, fdx)
+      // Update facing — use the actual movement direction (dx/dy toward
+      // current waypoint) for smooth, jitter-free rotation instead of
+      // snapping toward the final destination each tick.
+      const targetFacing = Math.atan2(dy, dx)
+      // Lerp the angle to avoid snapping
+      let facingDiff = targetFacing - entity.facing
+      while (facingDiff > Math.PI) facingDiff -= 2 * Math.PI
+      while (facingDiff < -Math.PI) facingDiff += 2 * Math.PI
+      const facingLerp = Math.min(1, 15 * dtSeconds)
+      entity.facing += facingDiff * facingLerp
 
       // Move toward waypoint
       const step = entity.moveSpeed * dtSeconds
@@ -524,6 +535,8 @@ export class GameState {
         maxMp: entity.maxMp,
         team: entity.team,
         alive: entity.alive,
+        // Champion identity
+        championType: entity.championType,
         // Combat state
         state: entity.stateMachine.state,
         attackPhase: entity.stateMachine.isAttacking()
@@ -535,9 +548,15 @@ export class GameState {
         xp: entity.stats.xp,
         xpToNextLevel: entity.stats.xpToNextLevel,
         ad: effective.ad,
+        ap: effective.ap,
         armor: effective.armor,
         magicResist: effective.magicResist,
         attackSpeed: effective.attackSpeed,
+        moveSpeed: effective.moveSpeed,
+        attackRange: effective.attackRange,
+        hpRegen: effective.hpRegen,
+        mpRegen: effective.mpRegen,
+        critChance: effective.critChance,
         // Death
         respawnTimerMs: entity.stateMachine.isDead()
           ? entity.stateMachine.respawnTimerMs

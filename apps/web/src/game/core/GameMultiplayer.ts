@@ -1,9 +1,12 @@
 import * as THREE from 'three'
 import { CSS2DRenderer } from 'three/addons/renderers/CSS2DRenderer.js'
-import { type WorldPosition, type SnapshotPayload, type Team } from '@template-dev/shared'
+import { ARAM_MAP, type WorldPosition, type SnapshotPayload, type Team } from '@template-dev/shared'
 import { useGameSettingsStore } from '@/stores/game-settings.store'
+import { AssetManager } from '../assets/AssetManager'
+import { CRITICAL_ASSETS } from '../assets/asset-paths'
 import { Camera } from './Camera'
 import { MapRenderer } from '../rendering/MapRenderer'
+import { BushRenderer3D } from '../rendering/BushRenderer3D'
 import { MoveIndicator } from '../rendering/MoveIndicator'
 import { Minimap } from '../rendering/Minimap'
 import { EntityManager } from '../entities/EntityManager'
@@ -23,6 +26,7 @@ export class GameMultiplayer {
   private moveIndicator!: MoveIndicator
   private minimap!: Minimap
   private entityManager!: EntityManager
+  private bushRenderers: BushRenderer3D[] = []
 
   private networkClient: NetworkClient
   private snapshotBuffer: SnapshotBuffer
@@ -35,7 +39,7 @@ export class GameMultiplayer {
   private _paused = false
   private rightMouseDown = false
   private lastMoveCommandTime = 0
-  private static readonly MOVE_THROTTLE_MS = 50
+  private static readonly MOVE_THROTTLE_MS = 80
   private lastMoveTarget: WorldPosition | null = null
 
   // Camera pan keys state
@@ -141,6 +145,17 @@ export class GameMultiplayer {
 
     // Entity manager (handles all champions + towers)
     this.entityManager = new EntityManager(this.scene)
+    this.entityManager.localEntityId = this.localEntityId
+
+    // Bushes (3D procedural vegetation)
+    for (const bush of ARAM_MAP.bushZones) {
+      const bushRenderer = new BushRenderer3D(bush)
+      this.scene.add(bushRenderer.group)
+      this.bushRenderers.push(bushRenderer)
+    }
+
+    // Load map assets in background (non-blocking)
+    this.loadMapAssets()
 
     // Minimap
     this.minimap = new Minimap(this.renderer, this.scene, this.camera)
@@ -158,6 +173,7 @@ export class GameMultiplayer {
         const localEntity = snapshot.entities.find((e) => e.id === this.localEntityId)
         if (localEntity) {
           this.localTeam = localEntity.team
+          this.entityManager.localTeam = localEntity.team
           console.warn(
             `[Game] Local player resolved: ${this.localEntityId} team=${localEntity.team}`,
           )
@@ -393,6 +409,18 @@ export class GameMultiplayer {
 
   private update(dt: number): void {
     this.moveIndicator.update(dt)
+    this.mapRenderer.updateMapTransform()
+
+    // Toggle tower/bush visibility from map debug settings
+    const settings = useGameSettingsStore.getState()
+    const hideStructures = settings.mapDebugHideStructures
+    for (const b of this.bushRenderers) b.group.visible = !hideStructures
+
+    // Live-update entity height and structure scale from settings
+    const entityY = settings.championHeight
+    for (const b of this.bushRenderers) b.group.position.y = entityY
+    this.entityManager.setEntityHeight(entityY)
+    this.entityManager.setStructureScale(settings.structureScale)
 
     const renderTimeMs = this.clockSync.getRenderTimeMs()
     const interpState = this.snapshotBuffer.getInterpolationState(renderTimeMs)
@@ -462,6 +490,21 @@ export class GameMultiplayer {
   }
 
   // ===========================================================================
+  // Map & structure asset loading
+  // ===========================================================================
+
+  private async loadMapAssets(): Promise<void> {
+    if (this.destroyed) return
+    const manager = AssetManager.getInstance()
+
+    // 1. Preload structure models for EntityManager to use
+    await manager.preloadAssets(CRITICAL_ASSETS)
+
+    // 2. Load map terrain in background (96MB, non-blocking)
+    this.mapRenderer.loadMapModel().catch(() => {})
+  }
+
+  // ===========================================================================
   // Cleanup
   // ===========================================================================
 
@@ -489,6 +532,7 @@ export class GameMultiplayer {
     this.mapRenderer?.destroy()
     this.minimap?.destroy()
     this.moveIndicator?.destroy()
+    for (const b of this.bushRenderers) b.destroy()
 
     // Remove CSS2D renderer DOM element
     this.cssRenderer?.domElement.remove()

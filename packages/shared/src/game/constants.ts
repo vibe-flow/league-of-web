@@ -217,12 +217,12 @@ export const MINIMAP_PADDING = 12
 // Network / Game loop
 // =============================================================================
 
-export const TICK_RATE = 30
-export const TICK_DURATION_MS = 1000 / TICK_RATE // ~33.33ms
+export const TICK_RATE = 60
+export const TICK_DURATION_MS = 1000 / TICK_RATE // ~16.67ms
 export const TICK_DURATION_S = 1 / TICK_RATE
-export const MAX_CATCH_UP_TICKS = 3
+export const MAX_CATCH_UP_TICKS = 4
 
-export const INTERPOLATION_DELAY_MS = 100 // render ~3 ticks behind server
+export const INTERPOLATION_DELAY_MS = 50 // render ~3 ticks behind server (60Hz)
 export const SNAP_THRESHOLD = 2 // units — ignore small prediction errors
 export const TELEPORT_THRESHOLD = 100 // units — snap instantly if too far off
 

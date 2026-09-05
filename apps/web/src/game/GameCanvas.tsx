@@ -1,12 +1,27 @@
 import { useEffect, useRef, useState } from 'react'
 import { Game } from './core/Game'
 import SettingsMenu from './ui/settings/SettingsMenu'
+import HudBar from './ui/hud/HudBar'
 
 export default function GameCanvas() {
   const containerRef = useRef<HTMLDivElement>(null)
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const gameRef = useRef<Game | null>(null)
   const [settingsOpen, setSettingsOpen] = useState(false)
+
+  const toggleSettings = useRef(() => {})
+  const closeSettings = useRef(() => {})
+
+  // Keep refs updated so the Game callback never uses stale closures
+  toggleSettings.current = () => {
+    const next = !settingsOpen
+    setSettingsOpen(next)
+    gameRef.current?.setPaused(next)
+  }
+  closeSettings.current = () => {
+    setSettingsOpen(false)
+    gameRef.current?.setPaused(false)
+  }
 
   useEffect(() => {
     const canvas = canvasRef.current
@@ -16,7 +31,8 @@ export default function GameCanvas() {
     gameRef.current = game
     let cancelled = false
 
-    game.onPauseChange = (paused) => setSettingsOpen(paused)
+    // Game notifies us that Escape was pressed — we handle all state
+    game.onEscapePressed = () => toggleSettings.current()
 
     game
       .init(canvas)
@@ -43,11 +59,6 @@ export default function GameCanvas() {
     }
   }, [])
 
-  const handleCloseSettings = () => {
-    gameRef.current?.setPaused(false)
-    setSettingsOpen(false)
-  }
-
   return (
     <>
       <div ref={containerRef} style={{ position: 'relative', width: '100vw', height: '100vh' }}>
@@ -61,7 +72,8 @@ export default function GameCanvas() {
           }}
         />
       </div>
-      {settingsOpen && <SettingsMenu onClose={handleCloseSettings} />}
+      <HudBar />
+      {settingsOpen && <SettingsMenu onClose={() => closeSettings.current()} />}
     </>
   )
 }

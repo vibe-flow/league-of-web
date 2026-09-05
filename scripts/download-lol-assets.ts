@@ -9,6 +9,7 @@
  *   bun run scripts/download-lol-assets.ts --extras           # Download extras (towers, minions, etc.)
  *   bun run scripts/download-lol-assets.ts --list             # List all champions
  *   bun run scripts/download-lol-assets.ts --concurrency 5    # Max parallel downloads (default: 3)
+ *   bun run scripts/download-lol-assets.ts --force            # Re-download even if file exists
  */
 
 import { mkdir, exists } from 'fs/promises'
@@ -55,7 +56,9 @@ const flags = {
   list: args.includes('--list'),
   concurrency: parseInt(getFlag('--concurrency', '3')),
   skinsOnly: args.includes('--skins-only'),
+  baseOnly: args.includes('--base-only'),
   dryRun: args.includes('--dry-run'),
+  force: args.includes('--force'),
 }
 
 function getFlag(name: string, defaultValue: string): string {
@@ -72,10 +75,14 @@ async function fetchJSON<T>(url: string): Promise<T> {
   return res.json()
 }
 
-async function downloadFile(url: string, outputPath: string): Promise<DownloadResult> {
+async function downloadFile(
+  url: string,
+  outputPath: string,
+  force = false,
+): Promise<DownloadResult> {
   try {
-    // Skip if already exists
-    if (await exists(outputPath)) {
+    // Skip if already exists (unless --force)
+    if (!force && (await exists(outputPath))) {
       const file = Bun.file(outputPath)
       return { path: outputPath, success: true, size: file.size }
     }
@@ -152,21 +159,23 @@ function getModelUrl(alias: string, skinId: number, quality: 'lite' | 'full'): s
 async function downloadChampion(
   champion: ChampionData,
   quality: 'lite' | 'full',
+  force = false,
 ): Promise<{ downloaded: number; skipped: number; failed: number }> {
   const alias = champion.alias.toLowerCase()
   const stats = { downloaded: 0, skipped: 0, failed: 0 }
 
-  for (const skin of champion.skins) {
+  const skins = flags.baseOnly ? champion.skins.filter((s) => s.isBase) : champion.skins
+  for (const skin of skins) {
     const url = getModelUrl(alias, skin.id, quality)
     const skinLabel = skin.isBase ? 'base' : skin.name
     const outputPath = join(OUTPUT_DIR, 'champions', alias, `${skin.id}.glb`)
 
-    if (await exists(outputPath)) {
+    if (!force && (await exists(outputPath))) {
       stats.skipped++
       continue
     }
 
-    const result = await downloadFile(url, outputPath)
+    const result = await downloadFile(url, outputPath, force)
 
     if (result.success) {
       stats.downloaded++
@@ -243,6 +252,7 @@ async function main() {
   console.log(`   CDN: ${CDN_BASE}`)
   console.log(`   Output: ${OUTPUT_DIR}`)
   console.log(`   Quality: ${flags.quality}`)
+  console.log(`   Force: ${flags.force}`)
   console.log(`   Concurrency: ${flags.concurrency}\n`)
 
   // Get champion list
@@ -287,7 +297,7 @@ async function main() {
         return
       }
 
-      const stats = await downloadChampion(champData, flags.quality)
+      const stats = await downloadChampion(champData, flags.quality, flags.force)
       totals.downloaded += stats.downloaded
       totals.skipped += stats.skipped
       totals.failed += stats.failed
@@ -321,7 +331,7 @@ async function main() {
         return
       }
 
-      const result = await downloadFile(url, outputPath)
+      const result = await downloadFile(url, outputPath, flags.force)
       if (result.success) {
         totals.downloaded++
         console.log(`  ✅ [${i + 1}/${extras.length}] ${extra.alias} (${formatSize(result.size!)})`)

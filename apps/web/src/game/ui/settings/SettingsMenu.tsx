@@ -2,10 +2,16 @@ import { useCallback, useRef, useState } from 'react'
 import HotkeysTab from './HotkeysTab'
 import CameraTab from './CameraTab'
 import InterfaceTab from './InterfaceTab'
+import ChampionTab from './ChampionTab'
+import CameraDebugTab from './CameraDebugTab'
+import MapDebugTab from './MapDebugTab'
 
 const TABS = [
+  { id: 'champion', label: 'Champion' },
   { id: 'hotkeys', label: 'Raccourcis' },
   { id: 'camera', label: 'Caméra' },
+  { id: 'cam-debug', label: 'Cam Debug' },
+  { id: 'map-debug', label: 'Map Debug' },
   { id: 'interface', label: 'Interface' },
 ] as const
 
@@ -16,7 +22,7 @@ interface SettingsMenuProps {
 }
 
 export default function SettingsMenu({ onClose }: SettingsMenuProps) {
-  const [activeTab, setActiveTab] = useState<TabId>('hotkeys')
+  const [activeTab, setActiveTab] = useState<TabId>('champion')
 
   // Drag state
   const [pos, setPos] = useState<{ x: number; y: number } | null>(null)
@@ -58,7 +64,7 @@ export default function SettingsMenu({ onClose }: SettingsMenuProps) {
       <div
         ref={panelRef}
         style={panelStyle}
-        className="flex h-[520px] w-[750px] flex-col rounded-lg border border-yellow-900/50 bg-[#0a0e14] shadow-2xl"
+        className="flex h-[600px] w-[750px] flex-col rounded-lg border border-yellow-900/50 bg-[#0a0e14] shadow-2xl"
       >
         {/* Header — draggable */}
         <div
@@ -98,10 +104,33 @@ export default function SettingsMenu({ onClose }: SettingsMenuProps) {
           </nav>
 
           {/* Content */}
-          <div className="flex-1 overflow-y-auto p-6">
-            {activeTab === 'hotkeys' && <HotkeysTab />}
-            {activeTab === 'camera' && <CameraTab />}
-            {activeTab === 'interface' && <InterfaceTab />}
+          <div className="flex min-h-0 flex-1 flex-col p-6">
+            {activeTab === 'champion' && <ChampionTab />}
+            {activeTab === 'hotkeys' && (
+              <div className="overflow-y-auto">
+                <HotkeysTab />
+              </div>
+            )}
+            {activeTab === 'camera' && (
+              <div className="overflow-y-auto">
+                <CameraTab />
+              </div>
+            )}
+            {activeTab === 'cam-debug' && (
+              <div className="overflow-y-auto">
+                <CameraDebugTab />
+              </div>
+            )}
+            {activeTab === 'map-debug' && (
+              <div className="overflow-y-auto">
+                <MapDebugTab />
+              </div>
+            )}
+            {activeTab === 'interface' && (
+              <div className="overflow-y-auto">
+                <InterfaceTab />
+              </div>
+            )}
           </div>
         </div>
 

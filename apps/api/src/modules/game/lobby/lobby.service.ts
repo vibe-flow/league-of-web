@@ -96,7 +96,7 @@ export class LobbyService {
       players: lobby.players.map((p) => ({
         playerId: p.userId,
         team: p.team,
-        championType: 'default',
+        championType: p.championType ?? 'default',
       })),
     }
 

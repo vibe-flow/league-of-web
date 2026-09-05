@@ -9,15 +9,20 @@ import {
   WAYPOINT_REACH_THRESHOLD,
   COLORS,
   TOWER_DEFINITIONS,
+  EntityState,
   type WorldPosition,
 } from '@template-dev/shared'
 import { NavigationGrid, findPath, hasLineOfSight } from '../pathfinding'
-import { useGameSettingsStore } from '@/stores/game-settings.store'
+import { useGameSettingsStore, type AbilitySlot } from '@/stores/game-settings.store'
+import { useHudStore } from '@/stores/hud.store'
 import { AssetManager } from '../assets/AssetManager'
+import { CRITICAL_ASSETS, ASSET_TURRET, ASSET_NEXUS } from '../assets/asset-paths'
 import { Camera } from './Camera'
 import { MapRenderer } from '../rendering/MapRenderer'
 import { ChampionRenderer3D } from '../rendering/ChampionRenderer3D'
+import { AnimationController } from '../rendering/AnimationController'
 import { TowerRenderer3D } from '../rendering/TowerRenderer3D'
+import { BushRenderer3D } from '../rendering/BushRenderer3D'
 import { HealthBar } from '../rendering/HealthBar'
 import { MoveIndicator } from '../rendering/MoveIndicator'
 import { Minimap } from '../rendering/Minimap'
@@ -32,7 +37,9 @@ export class Game {
   private camera!: Camera
   private mapRenderer!: MapRenderer
   private championRenderer!: ChampionRenderer3D
+  private animController!: AnimationController
   private towerRenderers: TowerRenderer3D[] = []
+  private bushRenderers: BushRenderer3D[] = []
   private healthBar!: HealthBar
   private moveIndicator!: MoveIndicator
   private minimap!: Minimap
@@ -55,8 +62,8 @@ export class Game {
   private keysDown = new Set<string>()
   private spaceDown = false
 
-  // Callback to notify React of pause state changes
-  onPauseChange: ((paused: boolean) => void) | null = null
+  // Callback to notify React that Escape was pressed (React handles the toggle)
+  onEscapePressed: (() => void) | null = null
 
   // Store references for cleanup
   private onResize: (() => void) | null = null
@@ -71,11 +78,19 @@ export class Game {
   private cleanupMinimapInput: (() => void) | null = null
   private canvas: HTMLCanvasElement | null = null
 
+  // Champion model tracking
+  private loadedChampionAlias = ''
+  private loadedSkinId = ''
+  private loadedModelScale = 1
+  private loadingVersion = 0 // incremented to cancel stale async loads
+  private unsubscribeStore: (() => void) | null = null
+
   get paused(): boolean {
     return this._paused
   }
 
   setPaused(paused: boolean): void {
+    console.log(`[Game] setPaused(${paused})`, new Error().stack?.split('\n')[2]?.trim())
     this._paused = paused
     this.rightMouseDown = false
     this.keysDown.clear()
@@ -136,6 +151,10 @@ export class Game {
     this.championRenderer.setPosition(this.playerPos)
     this.scene.add(this.championRenderer.group)
 
+    // Animation controller — centralized animation state management
+    const { selectedChampion } = useGameSettingsStore.getState()
+    this.animController = new AnimationController(this.championRenderer, selectedChampion)
+
     // Health bar (child of champion so it moves with it)
     this.healthBar = new HealthBar()
     this.championRenderer.group.add(this.healthBar.object)
@@ -151,9 +170,39 @@ export class Game {
       this.towerRenderers.push(tower)
     }
 
+    // Bushes (3D procedural vegetation)
+    for (const bush of ARAM_MAP.bushZones) {
+      const bushRenderer = new BushRenderer3D(bush)
+      this.scene.add(bushRenderer.group)
+      this.bushRenderers.push(bushRenderer)
+    }
+
+    // Load map assets in background (non-blocking)
+    this.loadMapAssets()
+
     // Minimap
     this.minimap = new Minimap(this.renderer, this.scene, this.camera)
     this.minimap.positionOnScreen(w, h)
+
+    // Load champion GLB model from settings
+    this.loadChampionFromSettings()
+
+    // Subscribe to champion/skin/scale changes in the store
+    this.unsubscribeStore = useGameSettingsStore.subscribe((state) => {
+      if (
+        state.selectedChampion !== this.loadedChampionAlias ||
+        state.selectedSkin !== this.loadedSkinId
+      ) {
+        this.loadChampionModel(state.selectedChampion, state.selectedSkin)
+        this.updateHudChampion(state.selectedChampion)
+        this.animController.setChampion(state.selectedChampion)
+      }
+      const scale = state.modelScale || 1
+      if (scale !== this.loadedModelScale) {
+        this.loadedModelScale = scale
+        this.championRenderer.setModelScale(scale)
+      }
+    })
 
     // Input
     this.bindInput(canvas)
@@ -180,10 +229,14 @@ export class Game {
       const now = performance.now()
       const dt = (now - this.lastTime) / 1000
       this.lastTime = now
-      this.update(dt)
-      this.renderer.render(this.scene, this.camera.threeCamera)
-      this.cssRenderer.render(this.scene, this.camera.threeCamera)
-      this.minimap.render()
+      try {
+        this.update(dt)
+        this.renderer.render(this.scene, this.camera.threeCamera)
+        this.cssRenderer.render(this.scene, this.camera.threeCamera)
+        this.minimap.render()
+      } catch (err) {
+        console.error('[Game] Error in animation loop:', err)
+      }
     }
     animate()
 
@@ -238,7 +291,11 @@ export class Game {
     canvas.addEventListener('contextmenu', this.onContextMenu)
 
     this.onMouseDown = (e: MouseEvent) => {
-      if (e.button !== 2 || this.destroyed || this._paused) return
+      if (e.button !== 2) return
+      if (this.destroyed || this._paused) {
+        console.log(`[Game] mousedown blocked: destroyed=${this.destroyed}, paused=${this._paused}`)
+        return
+      }
       if (this.minimap.containsScreenPoint(e.clientX, e.clientY)) return
       this.rightMouseDown = true
       this.lastMoveCommandTime = 0
@@ -273,17 +330,30 @@ export class Game {
     canvas.addEventListener('selectstart', this.onSelectStart)
 
     this.onKeyDown = (e: KeyboardEvent) => {
-      if (this.destroyed) return
+      if (this.destroyed || e.repeat) return
       const key = e.code
 
       if (key === 'Escape') {
-        const next = !this._paused
-        this.setPaused(next)
-        this.onPauseChange?.(next)
+        // Let React handle the toggle — it calls setPaused
+        this.onEscapePressed?.()
         return
       }
 
       if (this._paused) return
+
+      // Ability keys (Q, W, E, R by default — configurable)
+      const keybinds = useGameSettingsStore.getState().abilityKeybinds
+      for (const slotStr of Object.keys(keybinds)) {
+        const slot = Number(slotStr) as AbilitySlot
+        if (key === keybinds[slot]) {
+          e.preventDefault()
+          const cast = useHudStore.getState().castAbility(slot)
+          if (cast) {
+            this.animController.castSpell(slot)
+          }
+          return
+        }
+      }
 
       if (key === 'Space') {
         e.preventDefault()
@@ -361,6 +431,47 @@ export class Game {
   }
 
   // ===========================================================================
+  // Champion model loading
+  // ===========================================================================
+
+  private loadChampionFromSettings(): void {
+    const { selectedChampion, selectedSkin } = useGameSettingsStore.getState()
+    if (selectedChampion && selectedSkin) {
+      this.loadChampionModel(selectedChampion, selectedSkin)
+    }
+    // Initialize HUD with champion info
+    this.updateHudChampion(selectedChampion)
+  }
+
+  private updateHudChampion(alias: string): void {
+    useHudStore.getState().initChampion(alias)
+  }
+
+  private async loadChampionModel(alias: string, skinId: string): Promise<void> {
+    if (this.destroyed) return
+    // Cancel any previous in-flight load
+    const version = ++this.loadingVersion
+    // Update tracking immediately to prevent re-triggering from the subscriber
+    this.loadedChampionAlias = alias
+    this.loadedSkinId = skinId
+    try {
+      const manager = AssetManager.getInstance()
+      await manager.preloadChampion(alias, skinId)
+      // Stale — a newer load was triggered while we were loading
+      if (this.destroyed || version !== this.loadingVersion) return
+      const result = manager.getChampionModel(alias, skinId)
+      if (result) {
+        this.championRenderer.setGLBModel(result.model, result.animations)
+        const scale = useGameSettingsStore.getState().modelScale
+        this.championRenderer.setModelScale(scale)
+        this.loadedModelScale = scale
+      }
+    } catch (err) {
+      console.warn(`[Game] Failed to load champion model: ${alias}/${skinId}`, err)
+    }
+  }
+
+  // ===========================================================================
   // Update loop
   // ===========================================================================
 
@@ -368,6 +479,27 @@ export class Game {
     this.updateMovement(dt)
     this.moveIndicator.update(dt)
     this.camera.update(dt, this.playerPos)
+    this.animController.update(dt)
+    useHudStore.getState().tick(dt)
+
+    // Live-update map transform from debug settings
+    this.mapRenderer.updateMapTransform()
+
+    // Toggle tower/bush/champion visibility from map debug settings
+    const settings = useGameSettingsStore.getState()
+    const hideStructures = settings.mapDebugHideStructures
+    for (const t of this.towerRenderers) t.group.visible = !hideStructures
+    for (const b of this.bushRenderers) b.group.visible = !hideStructures
+    this.championRenderer.group.visible = !hideStructures
+    this.moveIndicator.mesh.visible = !hideStructures
+
+    // Live-update entity height and structure scale from settings
+    const entityY = settings.championHeight
+    for (const t of this.towerRenderers) {
+      t.group.position.y = entityY
+      t.setStructureScale(settings.structureScale)
+    }
+    for (const b of this.bushRenderers) b.group.position.y = entityY
 
     // Update visual positions
     this.championRenderer.setPosition(this.playerPos)
@@ -387,7 +519,12 @@ export class Game {
   }
 
   private updateMovement(dt: number): void {
-    if (this.waypoints.length === 0) return
+    if (this.waypoints.length === 0) {
+      this.animController.setState(EntityState.Idle)
+      return
+    }
+
+    this.animController.setState(EntityState.Moving)
 
     const target = this.waypoints[0]
     const dx = target.x - this.playerPos.x
@@ -398,6 +535,7 @@ export class Game {
       this.waypoints.shift()
       if (this.waypoints.length === 0) {
         this.moveTarget = null
+        this.animController.setState(EntityState.Idle)
         return
       }
       return
@@ -423,6 +561,31 @@ export class Game {
   }
 
   // ===========================================================================
+  // Map & structure asset loading
+  // ===========================================================================
+
+  private async loadMapAssets(): Promise<void> {
+    if (this.destroyed) return
+    const manager = AssetManager.getInstance()
+
+    // 1. Load structure models (turret + nexus, ~2MB total)
+    await manager.preloadAssets(CRITICAL_ASSETS)
+    if (this.destroyed) return
+
+    // 2. Apply GLB models to towers
+    for (const tower of this.towerRenderers) {
+      const assetKey = tower.tier === 'nexus' ? ASSET_NEXUS.key : ASSET_TURRET.key
+      const clone = manager.getAssetClone(assetKey)
+      if (clone) {
+        tower.setGLBModel(clone.model)
+      }
+    }
+
+    // 3. Load map terrain in background (96MB, non-blocking)
+    this.mapRenderer.loadMapModel().catch(() => {})
+  }
+
+  // ===========================================================================
   // Cleanup
   // ===========================================================================
 
@@ -431,6 +594,7 @@ export class Game {
 
     cancelAnimationFrame(this.animationFrameId)
 
+    if (this.unsubscribeStore) this.unsubscribeStore()
     if (this.cleanupMinimapInput) this.cleanupMinimapInput()
     if (this.onResize) window.removeEventListener('resize', this.onResize)
     if (this.onMouseMove) window.removeEventListener('mousemove', this.onMouseMove)
@@ -450,6 +614,7 @@ export class Game {
     this.championRenderer?.destroy()
     this.healthBar?.destroy()
     for (const t of this.towerRenderers) t.destroy()
+    for (const b of this.bushRenderers) b.destroy()
     this.cssRenderer?.domElement.remove()
 
     this.scene.traverse((obj) => {

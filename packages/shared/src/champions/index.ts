@@ -6,3 +6,4 @@ export {
   type ChampionCatalogEntry,
   type ChampionSkin,
 } from './catalog'
+export { CHAMPION_DEFINITIONS, DEFINED_CHAMPION_LIST, getChampionDefinition } from './definitions'

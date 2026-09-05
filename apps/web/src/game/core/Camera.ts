@@ -16,8 +16,10 @@ const ROTATION = -Math.PI / 4
 const INV_COS = Math.cos(-ROTATION)
 const INV_SIN = Math.sin(-ROTATION)
 
+const DEG2RAD = Math.PI / 180
+
 export class Camera {
-  readonly threeCamera: THREE.OrthographicCamera
+  readonly threeCamera: THREE.PerspectiveCamera
 
   private _x = 0
   private _y = 0
@@ -35,6 +37,12 @@ export class Camera {
   // Smooth pan target (used by minimap drag)
   private panTarget: WorldPosition | null = null
 
+  // Raycaster for screenToWorld
+  private raycaster = new THREE.Raycaster()
+  private groundPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0)
+  private _ndcVec = new THREE.Vector2()
+  private _intersectTarget = new THREE.Vector3()
+
   // Read pan speeds directly from Zustand store (no React middleman)
   private get edgePanSpeed(): number {
     return useGameSettingsStore.getState().edgePanSpeed
@@ -47,17 +55,10 @@ export class Camera {
     this.screenWidth = screenWidth
     this.screenHeight = screenHeight
 
-    const hw = screenWidth / 2
-    const hh = screenHeight / 2
-    this.threeCamera = new THREE.OrthographicCamera(-hw, hw, hh, -hh, 0.1, 10000)
+    const s = useGameSettingsStore.getState()
+    this.threeCamera = new THREE.PerspectiveCamera(s.camFov, screenWidth / screenHeight, 10, 20000)
 
-    // Position camera above the scene, looking down
-    this.threeCamera.position.set(0, 2000, 0)
-    this.threeCamera.up.set(0, 0, -1)
-    this.threeCamera.lookAt(0, 0, 0)
-
-    // Apply -45° rotation
-    this.threeCamera.rotation.z = ROTATION
+    this.threeCamera.position.set(0, s.camDistance, 0)
   }
 
   get x(): number {
@@ -76,6 +77,8 @@ export class Camera {
   setScreenSize(width: number, height: number): void {
     this.screenWidth = width
     this.screenHeight = height
+    this.threeCamera.aspect = width / height
+    this.threeCamera.updateProjectionMatrix()
     this.applyTransform()
   }
 
@@ -199,33 +202,78 @@ export class Camera {
     this.applyTransform()
   }
 
-  /** Convert screen coordinates to world coordinates. */
+  /** Convert screen coordinates to world coordinates via ray-plane intersection. */
   screenToWorld(screenX: number, screenY: number): WorldPosition {
-    const dx = (screenX - this.screenWidth / 2) / this._zoom
-    const dy = (screenY - this.screenHeight / 2) / this._zoom
+    // Convert screen coords to NDC (-1 to +1)
+    const ndcX = (screenX / this.screenWidth) * 2 - 1
+    const ndcY = -(screenY / this.screenHeight) * 2 + 1
 
-    return {
-      x: dx * INV_COS - dy * INV_SIN + this._x,
-      y: dx * INV_SIN + dy * INV_COS + this._y,
+    // Cast ray from camera through the NDC point
+    this._ndcVec.set(ndcX, ndcY)
+    this.raycaster.setFromCamera(this._ndcVec, this.threeCamera)
+
+    // Intersect with Y=0 ground plane
+    const hit = this.raycaster.ray.intersectPlane(this.groundPlane, this._intersectTarget)
+
+    if (hit) {
+      return { x: this._intersectTarget.x, y: this._intersectTarget.z }
     }
+
+    // Fallback (shouldn't happen with pitch > 0)
+    return { x: this._x, y: this._y }
   }
 
-  /** Apply camera transform. */
+  /**
+   * Apply camera transform using lookAt.
+   *
+   * The camera orbits around the target point (this._x, 0, this._y) like a
+   * spherical coordinate system:
+   *   - camPitch: elevation angle in degrees (90 = straight above, 0 = ground level)
+   *   - camYaw: horizontal angle in degrees (controls which direction is "forward")
+   *   - camDistance: how far the camera is from the target
+   *
+   * The camera always looks at the target point via lookAt().
+   */
   private applyTransform(): void {
     this._x = Math.max(0, Math.min(MAP_WIDTH, this._x))
     this._y = Math.max(0, Math.min(MAP_HEIGHT, this._y))
 
-    // Position camera above the target point (game Y → Three.js Z)
-    this.threeCamera.position.x = this._x
-    this.threeCamera.position.z = this._y
+    const s = useGameSettingsStore.getState()
+    const dist = s.camDistance / this._zoom
 
-    // Update zoom by adjusting the frustum
-    const hw = this.screenWidth / (2 * this._zoom)
-    const hh = this.screenHeight / (2 * this._zoom)
-    this.threeCamera.left = -hw
-    this.threeCamera.right = hw
-    this.threeCamera.top = hh
-    this.threeCamera.bottom = -hh
-    this.threeCamera.updateProjectionMatrix()
+    // Spherical → Cartesian offset from target
+    // pitch=90° → camera straight above (sin(90)=1 → all height, no horizontal offset)
+    // pitch=45° → 45° angle, equal height and horizontal offset
+    const pitchRad = s.camPitch * DEG2RAD
+    const yawRad = s.camYaw * DEG2RAD
+
+    const horizontalDist = dist * Math.cos(pitchRad)
+    const height = dist * Math.sin(pitchRad)
+
+    // Yaw determines which direction "behind" is in the XZ plane
+    // In Three.js: X is right, Z is "forward" (toward camera's default view)
+    const offsetX = horizontalDist * Math.sin(yawRad)
+    const offsetZ = horizontalDist * Math.cos(yawRad)
+
+    // Target point on the ground (game coords → Three.js)
+    const targetX = this._x
+    const targetZ = this._y
+
+    // Position camera at orbit point
+    this.threeCamera.position.set(targetX + offsetX, height, targetZ + offsetZ)
+
+    // Look slightly ahead of the target along the camera's forward direction
+    // This shifts the visual center so the champion appears in the lower third
+    // (like LoL), rather than dead center, giving more visibility ahead.
+    const lookAheadDist = dist * 0.15
+    const lookAheadX = -lookAheadDist * Math.sin(yawRad)
+    const lookAheadZ = -lookAheadDist * Math.cos(yawRad)
+    this.threeCamera.lookAt(targetX + lookAheadX, 0, targetZ + lookAheadZ)
+
+    // FOV
+    if (this.threeCamera.fov !== s.camFov) {
+      this.threeCamera.fov = s.camFov
+      this.threeCamera.updateProjectionMatrix()
+    }
   }
 }

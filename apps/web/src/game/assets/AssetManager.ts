@@ -137,4 +137,74 @@ export class AssetManager {
     if (!cached) return []
     return cached.animations.map((clip) => clip.name)
   }
+
+  // ===========================================================================
+  // Generic asset loading (maps, structures, extras)
+  // ===========================================================================
+
+  /**
+   * Preload any GLB asset by key and path. Uses the same cache and
+   * deduplication as champion models.
+   */
+  async preloadAsset(key: string, path: string): Promise<void> {
+    if (this.cache.has(key)) return
+
+    if (this.loadingPromises.has(key)) {
+      await this.loadingPromises.get(key)
+      return
+    }
+
+    const promise = new Promise<CachedModel>((resolve, reject) => {
+      this.loader.load(
+        path,
+        (gltf) => {
+          const cached: CachedModel = {
+            scene: gltf.scene,
+            animations: gltf.animations,
+          }
+          this.cache.set(key, cached)
+          this.loadingPromises.delete(key)
+          console.log(`[AssetManager] Loaded asset: ${key} (${gltf.animations.length} animations)`)
+          resolve(cached)
+        },
+        undefined,
+        (error) => {
+          this.loadingPromises.delete(key)
+          console.warn(`[AssetManager] Failed to load asset: ${key}`, error)
+          reject(error)
+        },
+      )
+    })
+
+    this.loadingPromises.set(key, promise)
+    await promise
+  }
+
+  /**
+   * Get the original scene of a loaded asset (no clone).
+   * Use for unique assets like the map terrain.
+   */
+  getAssetScene(key: string): THREE.Group | null {
+    return this.cache.get(key)?.scene ?? null
+  }
+
+  /**
+   * Get a cloned instance of a loaded asset with independent skeleton.
+   * Use for assets that need multiple copies (e.g. towers).
+   */
+  getAssetClone(key: string): { model: THREE.Group; animations: THREE.AnimationClip[] } | null {
+    const cached = this.cache.get(key)
+    if (!cached) return null
+    return {
+      model: SkeletonUtils.clone(cached.scene) as THREE.Group,
+      animations: cached.animations,
+    }
+  }
+
+  /**
+   * Preload multiple assets in parallel. Ignores individual failures.
+   */
+  async preloadAssets(entries: Array<{ key: string; path: string }>): Promise<void> {
+    await Promise.allSettled(entries.map((e) => this.preloadAsset(e.key, e.path)))
+  }
 }
